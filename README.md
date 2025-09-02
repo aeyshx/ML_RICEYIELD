@@ -17,7 +17,7 @@ Join keys: year, quarter (all rows are Albay-wide and temporally aligned).
 - rainfall, min_temperature, max_temperature, relative_humidity, wind_speed
 - wind_dir_sin, wind_dir_cos (from cleaned circular wind_direction)
 - quarter dummies (configurable)
-- typhoon_impact (1 only if STY present)
+- typhoon_impact (1 if typhoon present based on typhoon_impact_rule)
 - optional one-quarter lag for climate features
 
 Target: rice_yield = produced_rice / area_harvested (t/ha), validated against provided column when close.
@@ -38,7 +38,8 @@ Target: rice_yield = produced_rice / area_harvested (t/ha), validated against pr
 
 ### Configuration
 - See config.yaml. Environment overrides via .env (.env.example provided) for DATA_DIR, OUTPUT_DIR, MODELS_DIR.
+- Control model saving and sample creation via `output.save_model` and `output.create_sample` settings.
 
 ### Notes
-- STY-only typhoon_impact enforced.
+- Typhoon impact configurable via typhoon_impact_rule (STY_only or all_types).
 - Wind direction outside [0,360) treated as missing, imputed by circular mean before sin/cos.

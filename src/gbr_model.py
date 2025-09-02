@@ -31,16 +31,24 @@ def main(config_path: str) -> None:
     r2 = r2_score(ds.y_test, preds)
     print(f"Test RMSE: {rmse:.4f} | MAE: {mae:.4f} | R2: {r2:.4f}")
 
-    model_path = save_model(model, cfg['paths']['models_dir'], 'gbr')
-    print(f"Saved model to: {model_path}")
+    # Save model if configured to do so
+    if cfg.get('output', {}).get('save_model', True):
+        model_path = save_model(model, cfg['paths']['models_dir'], 'gbr')
+        print(f"Saved model to: {model_path}")
+    else:
+        print("Model saving disabled by configuration")
 
     pred_path, summary_path = write_predictions_and_summary(ds.test_index, preds, cfg['paths']['output_dir'], 'gbr')
     print(f"Wrote predictions: {pred_path}")
     print(f"Wrote summary: {summary_path}")
 
-    sp_pred, sp_sum = run_synthetic_self_check(pre, cfg, model, 'gbr')
-    print(f"Synthetic predictions: {sp_pred}")
-    print(f"Synthetic summary: {sp_sum}")
+    # Create sample outputs if configured to do so
+    if cfg.get('output', {}).get('create_sample', True):
+        sp_pred, sp_sum = run_synthetic_self_check(pre, cfg, model, 'gbr')
+        print(f"Synthetic predictions: {sp_pred}")
+        print(f"Synthetic summary: {sp_sum}")
+    else:
+        print("Sample creation disabled by configuration")
 
     write_readme(cfg)
 

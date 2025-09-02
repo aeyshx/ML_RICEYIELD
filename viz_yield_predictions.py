@@ -21,6 +21,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import warnings
+import joblib
+import glob
 
 # Try to import seaborn for enhanced styling
 try:
@@ -534,6 +536,100 @@ def save_metrics(data, model_name, output_dir, test_start, test_end):
     print(f"  MAPE: {metrics['mape']:.1f}%")
 
 
+def load_trained_model(models_dir, model_name):
+    """Load the most recent trained model for the given model name."""
+    # Find the most recent model file
+    pattern = os.path.join(models_dir, f"{model_name}_*.joblib")
+    model_files = glob.glob(pattern)
+    
+    if not model_files:
+        print(f"Warning: No trained model found for {model_name}")
+        return None
+    
+    # Get the most recent model file
+    latest_model = max(model_files, key=os.path.getctime)
+    
+    try:
+        model = joblib.load(latest_model)
+        print(f"Loaded model: {latest_model}")
+        return model
+    except Exception as e:
+        print(f"Error loading model {latest_model}: {e}")
+        return None
+
+
+def create_feature_importance_plot(model, model_name, output_dir, data_dir):
+    """Create feature importance plot for tree-based models."""
+    # Check if model has feature_importances_ attribute
+    if not hasattr(model, 'feature_importances_'):
+        print(f"Model {model_name} does not support feature importance (e.g., Linear Regression)")
+        return
+    
+    # Get feature names from the model or construct them
+    if hasattr(model, 'feature_names_in_'):
+        feature_names = model.feature_names_in_
+    else:
+        # Construct feature names based on the preprocessing logic
+        feature_names = [
+            'rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed',
+            'wind_dir_sin', 'wind_dir_cos', 'typhoon_impact',
+            'q_1', 'q_2', 'q_3', 'q_4',  # quarter dummies
+            'rainfall_lag1', 'min_temperature_lag1', 'max_temperature_lag1', 
+            'relative_humidity_lag1', 'wind_speed_lag1', 'wind_dir_sin_lag1', 'wind_dir_cos_lag1'
+        ]
+    
+    # Get feature importances
+    importances = model.feature_importances_
+    
+    # Create DataFrame for easier handling
+    importance_df = pd.DataFrame({
+        'feature': feature_names,
+        'importance': importances
+    }).sort_values('importance', ascending=True)
+    
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Create horizontal bar plot
+    bars = ax.barh(range(len(importance_df)), importance_df['importance'], 
+                   color='steelblue', alpha=0.7)
+    
+    # Customize the plot
+    ax.set_yticks(range(len(importance_df)))
+    ax.set_yticklabels(importance_df['feature'])
+    ax.set_xlabel('Feature Importance')
+    ax.set_title(f'Feature Importance — {model_name.upper()} Model', 
+                 fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='x')
+    
+    # Add value labels on bars
+    for i, (bar, importance) in enumerate(zip(bars, importance_df['importance'])):
+        ax.text(bar.get_width() + 0.001, bar.get_y() + bar.get_height()/2, 
+                f'{importance:.3f}', ha='left', va='center', fontsize=9)
+    
+    # Highlight key features mentioned by user
+    key_features = ['rainfall', 'min_temperature', 'max_temperature', 'typhoon_impact']
+    for i, feature in enumerate(importance_df['feature']):
+        if any(key_feat in feature for key_feat in key_features):
+            bars[i].set_color('orange')
+            bars[i].set_alpha(0.8)
+    
+    plt.tight_layout()
+    
+    # Save figure
+    output_path = os.path.join(output_dir, f'viz_feature_importance_{model_name}.png')
+    plt.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved feature importance plot: {output_path}")
+    
+    # Print top 5 most important features
+    top_features = importance_df.tail(5)
+    print(f"Top 5 most important features for {model_name.upper()}:")
+    for _, row in top_features.iterrows():
+        print(f"  {row['feature']}: {row['importance']:.4f}")
+
+
 def check_sample_predictions(output_dir, model_name):
     """Check if sample predictions exist and create quick visualizations."""
     sample_path = os.path.join(output_dir, "sample", f"sample_predictions_{model_name}.csv")
@@ -594,6 +690,7 @@ def main():
     # Extract paths and parameters
     data_dir = config['paths']['data_dir']
     output_dir = config['paths']['output_dir']
+    models_dir = config['paths']['models_dir']
     test_start = config['split_years']['test_start']
     test_end = config['split_years']['test_end']
     model_name = args.model_name
@@ -655,6 +752,12 @@ def main():
     
     # Save metrics
     save_metrics(data, model_name, output_dir, test_start, test_end)
+    
+    # Create feature importance plot
+    print("\nCreating feature importance plot...")
+    trained_model = load_trained_model(models_dir, model_name)
+    if trained_model is not None:
+        create_feature_importance_plot(trained_model, model_name, output_dir, data_dir)
     
     # Check for sample predictions
     check_sample_predictions(output_dir, model_name)

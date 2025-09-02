@@ -40,9 +40,10 @@ class DatasetSplit:
 
 
 class Preprocessor:
-    def __init__(self, use_quarter_dummies: bool = True, use_one_quarter_lag: bool = True):
+    def __init__(self, use_quarter_dummies: bool = True, use_one_quarter_lag: bool = True, typhoon_impact_rule: str = 'STY_only'):
         self.use_quarter_dummies = use_quarter_dummies
         self.use_one_quarter_lag = use_one_quarter_lag
+        self.typhoon_impact_rule = typhoon_impact_rule
         self.circular_mean_deg_: Optional[float] = None
         self.feature_columns_: List[str] = []
 
@@ -120,8 +121,15 @@ class Preprocessor:
         df['wind_dir_sin'] = np.sin(radians)
         df['wind_dir_cos'] = np.cos(radians)
 
-        # Typhoon impact: 1 if STY appears in that quarter, else 0
-        df['typhoon_impact'] = (df['type'].astype(str).str.upper() == 'STY').astype(int)
+        # Typhoon impact: 1 if typhoon appears in that quarter based on rule, else 0
+        if self.typhoon_impact_rule == 'STY_only':
+            df['typhoon_impact'] = (df['type'].astype(str).str.upper() == 'STY').astype(int)
+        elif self.typhoon_impact_rule == 'all_types':
+            # Include all typhoon types: TD, TS, STS, TY, STY
+            typhoon_types = ['TD', 'TS', 'STS', 'TY', 'STY']
+            df['typhoon_impact'] = df['type'].astype(str).str.upper().isin(typhoon_types).astype(int)
+        else:
+            raise ValueError(f"Unknown typhoon_impact_rule: {self.typhoon_impact_rule}")
 
         # Quarter features
         if self.use_quarter_dummies:
@@ -154,7 +162,7 @@ class Preprocessor:
         return X, y
 
 
-def read_and_join_data(data_dir: str) -> pd.DataFrame:
+def read_and_join_data(data_dir: str, typhoon_impact_rule: str = 'STY_only') -> pd.DataFrame:
     agri_path = os.path.join(data_dir, 'AGRICULTURE.csv')
     climate_path = os.path.join(data_dir, 'CLIMATE.csv')
     disasters_path = os.path.join(data_dir, 'DISASTERS.csv')
@@ -172,23 +180,51 @@ def read_and_join_data(data_dir: str) -> pd.DataFrame:
         if 'year' not in df.columns or 'quarter' not in df.columns:
             raise ValueError('All input files must contain year and quarter columns')
 
-    # Reduce disasters to per-quarter STY presence
+    # Reduce disasters to per-quarter typhoon presence based on rule
     disasters['type'] = disasters['type'].astype(str).str.upper()
-    sty_flags = (
-        disasters.assign(sty_flag=lambda d: (d['type'] == 'STY').astype(int))
-                 .groupby(['year', 'quarter'], as_index=False)['sty_flag']
-                 .max()
-    )
+    
+    if typhoon_impact_rule == 'STY_only':
+        typhoon_flags = (
+            disasters.assign(typhoon_flag=lambda d: (d['type'] == 'STY').astype(int))
+                     .groupby(['year', 'quarter'], as_index=False)['typhoon_flag']
+                     .max()
+        )
+    elif typhoon_impact_rule == 'all_types':
+        # Include all typhoon types: TD, TS, STS, TY, STY
+        typhoon_types = ['TD', 'TS', 'STS', 'TY', 'STY']
+        typhoon_flags = (
+            disasters.assign(typhoon_flag=lambda d: d['type'].isin(typhoon_types).astype(int))
+                     .groupby(['year', 'quarter'], as_index=False)['typhoon_flag']
+                     .max()
+        )
+    else:
+        raise ValueError(f"Unknown typhoon_impact_rule: {typhoon_impact_rule}")
 
     # Join on year and quarter
     joined = (
         agri.merge(climate, on=['year', 'quarter'], how='inner', suffixes=('', '_clim'))
-            .merge(sty_flags, on=['year', 'quarter'], how='left')
+            .merge(typhoon_flags, on=['year', 'quarter'], how='left')
     )
 
     # Use original disaster type column if present, else construct from flag for downstream processing
     if 'type' not in joined.columns:
-        joined['type'] = np.where(joined['sty_flag'] == 1, 'STY', 'NA')
+        if typhoon_impact_rule == 'STY_only':
+            joined['type'] = np.where(joined['typhoon_flag'] == 1, 'STY', 'NA')
+        else:  # all_types
+            # For all_types, we need to preserve the actual typhoon type
+            # This is a simplified approach - in practice, you might want to handle multiple types per quarter
+            typhoon_quarters = disasters[disasters['type'].isin(['TD', 'TS', 'STS', 'TY', 'STY'])]
+            if not typhoon_quarters.empty:
+                # Get the strongest typhoon type per quarter
+                type_priority = {'STY': 5, 'TY': 4, 'STS': 3, 'TS': 2, 'TD': 1}
+                typhoon_quarters['priority'] = typhoon_quarters['type'].map(type_priority)
+                strongest_per_quarter = typhoon_quarters.groupby(['year', 'quarter'])['priority'].idxmax()
+                strongest_types = typhoon_quarters.loc[strongest_per_quarter, ['year', 'quarter', 'type']].rename(columns={'type': 'typhoon_type'})
+                joined = joined.merge(strongest_types, on=['year', 'quarter'], how='left')
+                joined['type'] = joined['typhoon_type'].fillna('NA')
+                joined = joined.drop('typhoon_type', axis=1)
+            else:
+                joined['type'] = 'NA'
     joined['type'] = joined['type'].fillna('NA')
 
     # Ensure quarter is integer 1-4
@@ -207,13 +243,15 @@ def chronological_split(df: pd.DataFrame, train_start: int, train_end: int, test
 def prepare_datasets(cfg: Dict) -> Tuple[DatasetSplit, Preprocessor, pd.DataFrame, pd.DataFrame]:
     paths = cfg['paths']
     split = cfg['split_years']
-    data = read_and_join_data(paths['data_dir'])
+    typhoon_impact_rule = cfg['features'].get('typhoon_impact_rule', 'STY_only')
+    data = read_and_join_data(paths['data_dir'], typhoon_impact_rule)
 
     train_df, test_df = chronological_split(data, split['train_start'], split['train_end'], split['test_start'], split['test_end'])
 
     pre = Preprocessor(
         use_quarter_dummies=cfg['features'].get('use_quarter_dummies', True),
-        use_one_quarter_lag=cfg['features'].get('use_one_quarter_lag', True)
+        use_one_quarter_lag=cfg['features'].get('use_one_quarter_lag', True),
+        typhoon_impact_rule=typhoon_impact_rule
     )
     pre.fit(train_df)
 
@@ -313,7 +351,7 @@ Join keys: year, quarter (all rows are Albay-wide and temporally aligned).
 - rainfall, min_temperature, max_temperature, relative_humidity, wind_speed
 - wind_dir_sin, wind_dir_cos (from cleaned circular wind_direction)
 - quarter dummies (configurable)
-- typhoon_impact (1 only if STY present)
+- typhoon_impact (1 if typhoon present based on typhoon_impact_rule)
 - optional one-quarter lag for climate features
 
 Target: rice_yield = produced_rice / area_harvested (t/ha), validated against provided column when close.
@@ -334,9 +372,10 @@ Target: rice_yield = produced_rice / area_harvested (t/ha), validated against pr
 
 ### Configuration
 - See config.yaml. Environment overrides via .env (.env.example provided) for DATA_DIR, OUTPUT_DIR, MODELS_DIR.
+- Control model saving and sample creation via `output.save_model` and `output.create_sample` settings.
 
 ### Notes
-- STY-only typhoon_impact enforced.
+- Typhoon impact configurable via typhoon_impact_rule (STY_only or all_types).
 - Wind direction outside [0,360) treated as missing, imputed by circular mean before sin/cos.
 """.strip() + "\n"
     with open('README.md', 'w', encoding='utf-8') as f:

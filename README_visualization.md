@@ -8,6 +8,7 @@ This script (`viz_yield_predictions.py`) creates comprehensive visualizations fo
 - **Parity Plots**: Scatter plots with y=x reference line and metrics
 - **Residual Diagnostics**: Residual analysis with trend lines
 - **Seasonal Analysis**: Box plots showing seasonal distributions
+- **Feature Importance**: Horizontal bar plots showing feature importance for tree-based models
 - **STY Event Highlighting**: Optional highlighting of Super Typhoon quarters
 - **Metrics Export**: CSV files with RMSE, MAE, R², and MAPE metrics
 
@@ -39,6 +40,7 @@ For each model, the script generates:
 - `viz_yield_parity_[model].png`: Parity scatter plot with metrics
 - `viz_yield_residuals_[model].png`: Residual diagnostics
 - `viz_yield_seasonal_[model].png`: Seasonal distribution analysis
+- `viz_feature_importance_[model].png`: Feature importance plot (tree-based models only)
 
 ### Metrics Files
 - `metrics_[model].csv`: Performance metrics (RMSE, MAE, R², MAPE)
@@ -75,6 +77,16 @@ split_years:
 - High-resolution output (200 DPI)
 - Professional styling with Seaborn (if available)
 - LOWESS trend lines for residual analysis
+- Feature importance plots for tree-based models (Random Forest, Gradient Boosting)
+- Automatic model loading and feature importance extraction
+
+### Feature Importance Analysis
+- Automatically loads trained models from the models directory
+- Extracts feature importance for tree-based models (RF, GBR)
+- Creates horizontal bar plots with importance values
+- Highlights key features (rainfall, temperature, typhoon_impact)
+- Displays top 5 most important features in console output
+- Gracefully handles models without feature importance (e.g., Linear Regression)
 
 ### STY Event Integration
 - Automatically detects Super Typhoon quarters
@@ -109,6 +121,27 @@ The script provides detailed console output showing:
 - Test data points and range
 - Generated file paths
 - Model performance metrics
+
+## Features Used in Models
+
+The models use the following features for rice yield prediction:
+
+### Climate Features
+- **rainfall**: Total rainfall during the growing season
+- **min_temperature**: Minimum temperature (°C)
+- **max_temperature**: Maximum temperature (°C) 
+- **relative_humidity**: Relative humidity (%)
+- **wind_speed**: Wind speed (m/s)
+- **wind_dir_sin/wind_dir_cos**: Circular encoding of wind direction
+
+### Seasonal Features
+- **q_1, q_2, q_3, q_4**: Quarter dummy variables (Q1-Q4)
+
+### Disaster Features
+- **typhoon_impact**: Binary flag (1 if Super Typhoon present, 0 otherwise)
+
+### Lagged Features (Optional)
+- **rainfall_lag1, min_temperature_lag1, max_temperature_lag1, relative_humidity_lag1, wind_speed_lag1, wind_dir_sin_lag1, wind_dir_cos_lag1**: One-quarter lagged climate features
 
 ## Model Performance Summary
 
