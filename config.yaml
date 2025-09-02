@@ -1,0 +1,17 @@
+paths:
+  data_dir: data
+  output_dir: outputs
+  models_dir: models
+
+split_years:
+  train_start: 2000
+  train_end: 2018
+  test_start: 2019
+  test_end: 2023
+
+random_state: 42
+
+features:
+  use_quarter_dummies: false
+  use_one_quarter_lag: false
+  typhoon_impact_rule: STY_only
