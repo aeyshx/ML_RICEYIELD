@@ -12,40 +12,62 @@ split_years:
 random_state: 42
 
 features:
-  use_quarter_dummies: false
-  use_one_quarter_lag: false
+  use_quarter_dummies: true
+  use_one_quarter_lag: false  # Disabled in favor of multi-quarter lags
+  use_multi_quarter_lags: true
+  use_rolling_features: true
+  use_enhanced_typhoon: true
   typhoon_impact_rule: STY_only
 
 # Model configurations
 models:
   # Global model settings
-  save_model: false  # Set to false to skip saving models as joblib files
+  save_model: false  # Set to true to save models as joblib files
   
   # Linear Regression (MLR) specific settings
   mlr:
-    save_model: true  # Override global setting for this specific model
-    # LinearRegression doesn't have hyperparameters to tune
+    save_model: false  # Override global setting for this specific model
+    use_regularization: true  # Use Ridge/Lasso/ElasticNet instead of LinearRegression
+    regularization_type: 'ridge'  # 'ridge', 'lasso', 'elasticnet'
+    alpha: 1.0  # Regularization strength
+    l1_ratio: 0.5  # For ElasticNet (0=lasso, 1=ridge)
     
   # Random Forest specific settings
   rf:
     save_model: false  # Override global setting for this specific model
-    n_estimators: 5000
-    max_depth: null  # None for unlimited depth
-    min_samples_split: 2
-    min_samples_leaf: 1
-    max_features: 'sqrt'  # 'sqrt', 'log2', 'auto', or int/float
+    use_hyperparameter_tuning: true  # Enable GridSearchCV with TimeSeriesSplit
+    n_splits: 5  # Number of TimeSeriesSplit folds
+    n_estimators: [100, 200, 300, 500]  # Grid search values
+    max_depth: [5, 10, 15, 20]  # Grid search values (removed None to avoid validation error)
+    min_samples_leaf: [1, 2, 5]  # Grid search values
+    max_features: ['sqrt', 'log2']  # Grid search values
+    # Default values (used if tuning is disabled)
+    default_n_estimators: 300
+    default_max_depth: None
+    default_min_samples_split: 2
+    default_min_samples_leaf: 1
+    default_max_features: 'sqrt'
     bootstrap: true
     n_jobs: -1  # Use all CPU cores
     oob_score: false  # Out-of-bag score
     
   # Gradient Boosting specific settings
   gbr:
-    save_model: true  # Override global setting for this specific model
-    n_estimators: 100
-    learning_rate: 0.1
-    max_depth: 3
-    min_samples_split: 2
-    min_samples_leaf: 1
-    subsample: 1.0
-    max_features: null  # None for all features
-    loss: 'squared_error'  # 'squared_error', 'absolute_error', 'huber', 'quantile'
+    save_model: false  # Override global setting for this specific model
+    use_hyperparameter_tuning: true  # Enable GridSearchCV with TimeSeriesSplit
+    n_splits: 5  # Number of TimeSeriesSplit folds
+    n_estimators: [50, 100, 200]  # Grid search values
+    learning_rate: [0.05, 0.1, 0.2]  # Grid search values
+    max_depth: [3, 5, 7]  # Grid search values
+    subsample: [0.8, 1.0]  # Grid search values
+    loss: ['squared_error', 'huber']  # Grid search values
+    max_features: ['sqrt', 'log2']  # Grid search values (removed None)
+    # Default values (used if tuning is disabled)
+    default_n_estimators: 100
+    default_learning_rate: 0.1
+    default_max_depth: 3
+    default_min_samples_split: 2
+    default_min_samples_leaf: 1
+    default_subsample: 1.0
+    default_max_features: None
+    default_loss: 'squared_error'

@@ -1,0 +1,51 @@
+paths:
+  data_dir: data
+  output_dir: outputs
+  models_dir: models
+
+split_years:
+  train_start: 2000
+  train_end: 2018
+  test_start: 2019
+  test_end: 2023
+
+random_state: 42
+
+features:
+  use_quarter_dummies: false
+  use_one_quarter_lag: false
+  typhoon_impact_rule: STY_only
+
+# Model configurations
+models:
+  # Global model settings
+  save_model: false  # Set to false to skip saving models as joblib files
+  
+  # Linear Regression (MLR) specific settings
+  mlr:
+    save_model: true  # Override global setting for this specific model
+    # LinearRegression doesn't have hyperparameters to tune
+    
+  # Random Forest specific settings
+  rf:
+    save_model: false  # Override global setting for this specific model
+    n_estimators: 5000
+    max_depth: null  # None for unlimited depth
+    min_samples_split: 2
+    min_samples_leaf: 1
+    max_features: 'sqrt'  # 'sqrt', 'log2', 'auto', or int/float
+    bootstrap: true
+    n_jobs: -1  # Use all CPU cores
+    oob_score: false  # Out-of-bag score
+    
+  # Gradient Boosting specific settings
+  gbr:
+    save_model: true  # Override global setting for this specific model
+    n_estimators: 100
+    learning_rate: 0.1
+    max_depth: 3
+    min_samples_split: 2
+    min_samples_leaf: 1
+    subsample: 1.0
+    max_features: null  # None for all features
+    loss: 'squared_error'  # 'squared_error', 'absolute_error', 'huber', 'quantile'

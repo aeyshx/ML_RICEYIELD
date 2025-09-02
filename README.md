@@ -13,12 +13,16 @@ Join keys: year, quarter (all rows are Albay-wide and temporally aligned).
 - Train: 2000–2018
 - Test: 2019–2023
 
-### Features
+### Enhanced Features
 - rainfall, min_temperature, max_temperature, relative_humidity, wind_speed
 - wind_dir_sin, wind_dir_cos (from cleaned circular wind_direction)
+- temp_range, temp_mean (enhanced temperature features)
 - quarter dummies (configurable)
-- typhoon_impact (1 only if STY present)
-- optional one-quarter lag for climate features
+- typhoon_impact (basic STY flag)
+- Enhanced typhoon features: sty_count, storm_count, msw_max
+- Multi-quarter lags (1, 2, 3 quarters) for climate features
+- Rolling aggregates (2Q and 3Q means) for rainfall, humidity, temperature
+- All features aligned to avoid temporal leakage
 
 Target: rice_yield = produced_rice / area_harvested (t/ha), validated against provided column when close.
 
@@ -33,6 +37,7 @@ Target: rice_yield = produced_rice / area_harvested (t/ha), validated against pr
 ### Outputs
 - Predictions (test rows only): outputs/predictions_[model].csv with columns [year, quarter, produced_rice, area_harvested, rice_yield]
 - Per-model summary CSV: outputs/summary_[model].csv with [min_pred_yield, mean_pred_yield, max_pred_yield]
+- Detailed metrics: outputs/metrics_[model].csv with per-quarter and per-typhoon diagnostics
 - Saved models: models/*.joblib
 - Synthetic self-check outputs: outputs/sample/sample_predictions_[model].csv and sample_summary_[model].csv
 
@@ -42,3 +47,5 @@ Target: rice_yield = produced_rice / area_harvested (t/ha), validated against pr
 ### Notes
 - STY-only typhoon_impact enforced.
 - Wind direction outside [0,360) treated as missing, imputed by circular mean before sin/cos.
+- Enhanced feature engineering with multi-quarter lags and rolling aggregates.
+- Time-series cross-validation and hyperparameter tuning implemented.

@@ -1,671 +1,402 @@
 #!/usr/bin/env python3
 """
-Rice Yield Prediction Visualization Script
+Rice Yield Prediction Visualization and Diagnostics
 
-This script visualizes quarterly rice yield model predictions versus ground truth
-using Matplotlib and Seaborn, saving high-resolution figures and metrics CSV.
-
-Usage:
-    python viz_yield_predictions.py --config config.yaml --model_name mlr
-    python viz_yield_predictions.py --config config.yaml --model_name rf
-    python viz_yield_predictions.py --config config.yaml --model_name gbr
+This script creates comprehensive visualizations for analyzing model performance,
+residuals, feature importance, and temporal patterns in rice yield predictions.
 """
 
 import argparse
 import os
 import sys
-import yaml
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 from pathlib import Path
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import warnings
 
-# Try to import seaborn for enhanced styling
-try:
-    import seaborn as sns
-    SEABORN_AVAILABLE = True
-except ImportError:
-    SEABORN_AVAILABLE = False
-    print("Warning: Seaborn not available. Using basic matplotlib styling.")
+# Add src directory to path for imports
+sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+from utils import load_config, prepare_datasets
 
-# Try to import statsmodels for LOWESS
-try:
-    from statsmodels.nonparametric.smoothers_lowess import lowess
-    LOWESS_AVAILABLE = True
-except ImportError:
-    LOWESS_AVAILABLE = False
-    print("Warning: Statsmodels not available. Using simple moving average for trend lines.")
+# Set style for better plots
+plt.style.use('seaborn-v0_8')
+sns.set_palette("husl")
 
 
-def parse_arguments():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Visualize rice yield predictions vs ground truth",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    python viz_yield_predictions.py --config config.yaml --model_name mlr
-    python viz_yield_predictions.py --config config.yaml --model_name rf
-    python viz_yield_predictions.py --config config.yaml --model_name gbr
-        """
-    )
-    parser.add_argument(
-        "--config", 
-        type=str, 
-        required=True,
-        help="Path to configuration YAML file"
-    )
-    parser.add_argument(
-        "--model_name", 
-        type=str, 
-        required=True,
-        choices=["mlr", "rf", "gbr"],
-        help="Model name for predictions file"
-    )
-    return parser.parse_args()
+def load_predictions(output_dir: str, model_name: str) -> pd.DataFrame:
+    """Load predictions for a specific model"""
+    pred_path = os.path.join(output_dir, f"predictions_{model_name}.csv")
+    if not os.path.exists(pred_path):
+        raise FileNotFoundError(f"Predictions file not found: {pred_path}")
+    return pd.read_csv(pred_path)
 
 
-def load_config(config_path):
-    """Load configuration from YAML file."""
-    try:
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        return config
-    except FileNotFoundError:
-        print(f"Error: Configuration file '{config_path}' not found.")
-        sys.exit(1)
-    except yaml.YAMLError as e:
-        print(f"Error: Invalid YAML in configuration file: {e}")
-        sys.exit(1)
-
-
-def robust_numeric_parse(value):
-    """Robustly parse numeric values, handling thousands separators."""
-    if pd.isna(value) or value == '':
-        return np.nan
-    
-    # Convert to string and remove thousands separators
-    if isinstance(value, str):
-        # Remove quotes and thousands separators
-        value = value.replace('"', '').replace(',', '')
-    
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return np.nan
-
-
-def load_ground_truth(data_dir):
-    """Load and validate ground truth data from AGRICULTURE.csv."""
-    agriculture_path = os.path.join(data_dir, "AGRICULTURE.csv")
-    
-    if not os.path.exists(agriculture_path):
-        print(f"Error: Ground truth file '{agriculture_path}' not found.")
-        sys.exit(1)
-    
-    try:
-        df = pd.read_csv(agriculture_path)
-        
-        # Parse numeric columns with thousands separators
-        df['produced_rice'] = df['produced_rice'].apply(robust_numeric_parse)
-        df['area_harvested'] = df['area_harvested'].apply(robust_numeric_parse)
-        
-        # Compute rice_yield_true for validation
-        df['rice_yield_true'] = df['produced_rice'] / np.clip(df['area_harvested'], 1e-6, None)
-        
-        # Validate against provided rice_yield column
-        yield_diff = np.abs(df['rice_yield_true'] - df['rice_yield']).max()
-        if yield_diff > 1e-6:
-            print(f"Warning: Computed rice_yield differs from provided by max {yield_diff:.6f}")
-        
-        # Use computed rice_yield_true for consistency
-        df['rice_yield_true'] = df['rice_yield_true']
-        
-        print(f"Loaded ground truth data: {len(df)} rows")
-        print(f"Year range: {df['year'].min()} - {df['year'].max()}")
-        
-        return df[['year', 'quarter', 'rice_yield_true']]
-        
-    except Exception as e:
-        print(f"Error loading ground truth data: {e}")
-        sys.exit(1)
-
-
-def load_predictions(output_dir, model_name):
-    """Load model predictions from CSV file."""
-    predictions_path = os.path.join(output_dir, f"predictions_{model_name}.csv")
-    
-    if not os.path.exists(predictions_path):
-        print(f"Error: Predictions file '{predictions_path}' not found.")
-        sys.exit(1)
-    
-    try:
-        df = pd.read_csv(predictions_path)
-        
-        # Check if rice_yield column exists
-        if 'rice_yield' in df.columns:
-            # Rename to rice_yield_pred for clarity
-            df = df.rename(columns={'rice_yield': 'rice_yield_pred'})
-        elif 'rice_yield_pred' in df.columns:
-            pass  # Already correctly named
-        else:
-            print("Error: No rice_yield column found in predictions file.")
-            print(f"Available columns: {list(df.columns)}")
-            sys.exit(1)
-        
-        print(f"Loaded predictions data: {len(df)} rows")
-        print(f"Predictions columns: {list(df.columns)}")
-        
-        return df[['year', 'quarter', 'rice_yield_pred']]
-        
-    except Exception as e:
-        print(f"Error loading predictions data: {e}")
-        sys.exit(1)
-
-
-def load_disasters(data_dir):
-    """Load disasters data and create STY quarter flags."""
-    disasters_path = os.path.join(data_dir, "DISASTERS.csv")
-    
-    if not os.path.exists(disasters_path):
-        print(f"Warning: Disasters file '{disasters_path}' not found. STY highlighting disabled.")
+def load_metrics(output_dir: str, model_name: str) -> pd.DataFrame:
+    """Load metrics for a specific model"""
+    metrics_path = os.path.join(output_dir, f"metrics_{model_name}.csv")
+    if not os.path.exists(metrics_path):
+        print(f"Metrics file not found: {metrics_path}")
         return None
-    
-    try:
-        df = pd.read_csv(disasters_path)
-        
-        # Create STY-only binary flag
-        sty_quarters = df[df['type'] == 'STY'][['year', 'quarter']].drop_duplicates()
-        
-        # Create a flag for all quarters
-        all_quarters = pd.DataFrame([
-            (year, quarter) 
-            for year in range(2000, 2024) 
-            for quarter in range(1, 5)
-        ], columns=['year', 'quarter'])
-        
-        # Mark STY quarters
-        all_quarters['is_sty_quarter'] = all_quarters.set_index(['year', 'quarter']).index.isin(
-            sty_quarters.set_index(['year', 'quarter']).index
-        ).astype(int)
-        
-        print(f"Loaded disasters data: {len(df)} events")
-        print(f"STY quarters found: {sty_quarters.to_dict('records')}")
-        
-        return all_quarters
-        
-    except Exception as e:
-        print(f"Warning: Error loading disasters data: {e}. STY highlighting disabled.")
-        return None
+    return pd.read_csv(metrics_path)
 
 
-def compute_metrics(y_true, y_pred):
-    """Compute evaluation metrics."""
-    # Remove any NaN values
-    mask = ~(np.isnan(y_true) | np.isnan(y_pred))
-    y_true_clean = y_true[mask]
-    y_pred_clean = y_pred[mask]
+def plot_yield_parity(y_true: pd.Series, y_pred: np.ndarray, model_name: str, output_dir: str):
+    """Plot actual vs predicted yield parity plot"""
+    fig, ax = plt.subplots(figsize=(10, 8))
     
-    if len(y_true_clean) == 0:
-        return {
-            'rmse': np.nan,
-            'mae': np.nan,
-            'r2': np.nan,
-            'mape': np.nan,
-            'n_points': 0
-        }
+    # Calculate metrics
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
     
-    rmse = np.sqrt(mean_squared_error(y_true_clean, y_pred_clean))
-    mae = mean_absolute_error(y_true_clean, y_pred_clean)
-    r2 = r2_score(y_true_clean, y_pred_clean)
+    # Create scatter plot
+    ax.scatter(y_true, y_pred, alpha=0.6, s=50)
     
-    # MAPE with clipping to avoid division by zero
-    mape = np.mean(np.abs((y_true_clean - y_pred_clean) / np.clip(y_true_clean, 1e-6, None))) * 100
+    # Add perfect prediction line
+    min_val = min(y_true.min(), y_pred.min())
+    max_val = max(y_true.max(), y_pred.max())
+    ax.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='Perfect Prediction')
     
-    return {
-        'rmse': rmse,
-        'mae': mae,
-        'r2': r2,
-        'mape': mape,
-        'n_points': len(y_true_clean)
-    }
+    # Add metrics text
+    ax.text(0.05, 0.95, f'RMSE: {rmse:.3f}\nMAE: {mae:.3f}\nR²: {r2:.3f}', 
+            transform=ax.transAxes, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    ax.set_xlabel('Actual Yield (t/ha)')
+    ax.set_ylabel('Predicted Yield (t/ha)')
+    ax.set_title(f'{model_name.upper()} - Actual vs Predicted Yield')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Save plot
+    plot_path = os.path.join(output_dir, f"viz_yield_parity_{model_name}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved parity plot: {plot_path}")
 
 
-def setup_plotting_style():
-    """Setup matplotlib and seaborn styling."""
-    if SEABORN_AVAILABLE:
-        try:
-            plt.style.use('seaborn-v0_8')
-        except OSError:
-            # Fallback for newer seaborn versions
-            sns.set_style("whitegrid")
-    else:
-        # Basic matplotlib styling
-        plt.rcParams.update({
-            'font.size': 10,
-            'axes.titlesize': 12,
-            'axes.labelsize': 10,
-            'xtick.labelsize': 9,
-            'ytick.labelsize': 9,
-            'legend.fontsize': 9,
-            'figure.titlesize': 14,
-            'lines.linewidth': 2,
-            'axes.grid': True,
-            'grid.alpha': 0.3
-        })
-
-
-def create_time_series_plot(data, model_name, output_dir, test_start, test_end):
-    """Create time series overlay plot."""
-    fig, ax = plt.subplots(figsize=(12, 6))
+def plot_residuals(y_true: pd.Series, y_pred: np.ndarray, test_index: pd.DataFrame, 
+                  model_name: str, output_dir: str):
+    """Plot residuals analysis"""
+    residuals = y_true - y_pred
     
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # Residuals vs predicted
+    axes[0, 0].scatter(y_pred, residuals, alpha=0.6)
+    axes[0, 0].axhline(y=0, color='r', linestyle='--')
+    axes[0, 0].set_xlabel('Predicted Yield')
+    axes[0, 0].set_ylabel('Residuals')
+    axes[0, 0].set_title('Residuals vs Predicted')
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Residuals histogram
+    axes[0, 1].hist(residuals, bins=15, alpha=0.7, edgecolor='black')
+    axes[0, 1].set_xlabel('Residuals')
+    axes[0, 1].set_ylabel('Frequency')
+    axes[0, 1].set_title('Residuals Distribution')
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Residuals by quarter
+    quarter_residuals = []
+    quarter_labels = []
+    for quarter in [1, 2, 3, 4]:
+        mask = test_index['quarter'] == quarter
+        if mask.sum() > 0:
+            quarter_residuals.append(residuals[mask])
+            quarter_labels.append(f'Q{quarter}')
+    
+    if quarter_residuals:
+        axes[1, 0].boxplot(quarter_residuals, labels=quarter_labels)
+        axes[1, 0].set_ylabel('Residuals')
+        axes[1, 0].set_title('Residuals by Quarter')
+        axes[1, 0].grid(True, alpha=0.3)
+    
+    # Residuals by typhoon impact
+    if 'typhoon_impact' in test_index.columns:
+        typhoon_residuals = []
+        typhoon_labels = []
+        for typhoon_flag in [0, 1]:
+            mask = test_index['typhoon_impact'] == typhoon_flag
+            if mask.sum() > 0:
+                typhoon_residuals.append(residuals[mask])
+                typhoon_labels.append('No Typhoon' if typhoon_flag == 0 else 'Typhoon')
+        
+        if typhoon_residuals:
+            axes[1, 1].boxplot(typhoon_residuals, labels=typhoon_labels)
+            axes[1, 1].set_ylabel('Residuals')
+            axes[1, 1].set_title('Residuals by Typhoon Impact')
+            axes[1, 1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Save plot
+    plot_path = os.path.join(output_dir, f"viz_yield_residuals_{model_name}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved residuals plot: {plot_path}")
+
+
+def plot_temporal_analysis(test_index: pd.DataFrame, y_true: pd.Series, y_pred: np.ndarray, 
+                         model_name: str, output_dir: str):
+    """Plot temporal analysis of predictions"""
     # Create time index
-    data['time_index'] = data['year'] + (data['quarter'] - 1) / 4
+    test_index['date'] = pd.to_datetime(test_index['year'].astype(str) + '-' + 
+                                       (test_index['quarter'] * 3).astype(str) + '-15')
     
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
+    fig, axes = plt.subplots(2, 1, figsize=(15, 10))
     
-    # Plot true values
-    ax.plot(test_data['time_index'], test_data['rice_yield_true'], 
-            'o-', linewidth=2, markersize=6, label='True', color='blue')
+    # Time series plot
+    axes[0].plot(test_index['date'], y_true, 'o-', label='Actual', linewidth=2, markersize=6)
+    axes[0].plot(test_index['date'], y_pred, 's-', label='Predicted', linewidth=2, markersize=6)
+    axes[0].set_xlabel('Date')
+    axes[0].set_ylabel('Yield (t/ha)')
+    axes[0].set_title(f'{model_name.upper()} - Yield Predictions Over Time')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
     
-    # Plot predicted values
-    ax.plot(test_data['time_index'], test_data['rice_yield_pred'], 
-            's--', linewidth=2, markersize=6, label='Predicted', color='red')
+    # Residuals over time
+    residuals = y_true - y_pred
+    axes[1].plot(test_index['date'], residuals, 'o-', color='red', linewidth=2, markersize=6)
+    axes[1].axhline(y=0, color='black', linestyle='--', alpha=0.7)
+    axes[1].set_xlabel('Date')
+    axes[1].set_ylabel('Residuals')
+    axes[1].set_title('Residuals Over Time')
+    axes[1].grid(True, alpha=0.3)
     
-    # Highlight STY quarters if available
-    if 'is_sty_quarter' in test_data.columns:
-        sty_data = test_data[test_data['is_sty_quarter'] == 1]
-        if len(sty_data) > 0:
-            ax.scatter(sty_data['time_index'], sty_data['rice_yield_true'], 
-                      s=100, facecolors='none', edgecolors='orange', 
-                      linewidth=2, label='STY Quarter', zorder=5)
+    plt.tight_layout()
     
-    # Formatting
-    ax.set_title(f'Rice Yield (t/ha) — {model_name.upper()} — Test {test_start}-{test_end}', 
-                 fontsize=14, fontweight='bold')
-    ax.set_xlabel('Year')
-    ax.set_ylabel('Rice Yield (t/ha)')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # Save plot
+    plot_path = os.path.join(output_dir, f"viz_yield_timeseries_{model_name}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved temporal analysis plot: {plot_path}")
+
+
+def plot_seasonal_analysis(test_index: pd.DataFrame, y_true: pd.Series, y_pred: np.ndarray, 
+                          model_name: str, output_dir: str):
+    """Plot seasonal analysis"""
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     
-    # Format x-axis ticks
-    years = range(test_start, test_end + 1)
-    ax.set_xticks([y + 0.5 for y in years])
-    ax.set_xticklabels([str(y) for y in years])
+    # Actual vs Predicted by quarter
+    quarters = [1, 2, 3, 4]
+    actual_means = []
+    pred_means = []
+    actual_stds = []
+    pred_stds = []
     
-    # Annotate end-of-year points
+    for quarter in quarters:
+        mask = test_index['quarter'] == quarter
+        if mask.sum() > 0:
+            actual_means.append(y_true[mask].mean())
+            pred_means.append(y_pred[mask].mean())
+            actual_stds.append(y_true[mask].std())
+            pred_stds.append(y_pred[mask].std())
+        else:
+            actual_means.append(0)
+            pred_means.append(0)
+            actual_stds.append(0)
+            pred_stds.append(0)
+    
+    x = np.arange(len(quarters))
+    width = 0.35
+    
+    axes[0, 0].bar(x - width/2, actual_means, width, label='Actual', alpha=0.8)
+    axes[0, 0].bar(x + width/2, pred_means, width, label='Predicted', alpha=0.8)
+    axes[0, 0].set_xlabel('Quarter')
+    axes[0, 0].set_ylabel('Mean Yield (t/ha)')
+    axes[0, 0].set_title('Mean Yield by Quarter')
+    axes[0, 0].set_xticks(x)
+    axes[0, 0].set_xticklabels([f'Q{q}' for q in quarters])
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Standard deviation by quarter
+    axes[0, 1].bar(x - width/2, actual_stds, width, label='Actual', alpha=0.8)
+    axes[0, 1].bar(x + width/2, pred_stds, width, label='Predicted', alpha=0.8)
+    axes[0, 1].set_xlabel('Quarter')
+    axes[0, 1].set_ylabel('Std Dev Yield (t/ha)')
+    axes[0, 1].set_title('Yield Variability by Quarter')
+    axes[0, 1].set_xticks(x)
+    axes[0, 1].set_xticklabels([f'Q{q}' for q in quarters])
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Box plot by quarter
+    quarter_data = []
+    quarter_labels = []
+    for quarter in quarters:
+        mask = test_index['quarter'] == quarter
+        if mask.sum() > 0:
+            quarter_data.append(y_true[mask])
+            quarter_labels.append(f'Actual Q{quarter}')
+            quarter_data.append(y_pred[mask])
+            quarter_labels.append(f'Pred Q{quarter}')
+    
+    if quarter_data:
+        axes[1, 0].boxplot(quarter_data, labels=quarter_labels)
+        axes[1, 0].set_ylabel('Yield (t/ha)')
+        axes[1, 0].set_title('Yield Distribution by Quarter')
+        axes[1, 0].tick_params(axis='x', rotation=45)
+        axes[1, 0].grid(True, alpha=0.3)
+    
+    # Year-over-year comparison
+    years = sorted(test_index['year'].unique())
+    year_actual = []
+    year_pred = []
+    year_labels = []
+    
     for year in years:
-        year_data = test_data[test_data['year'] == year]
-        if len(year_data) > 0:
-            q4_data = year_data[year_data['quarter'] == 4]
-            if len(q4_data) > 0:
-                ax.annotate(f'{year} Q4', 
-                           xy=(q4_data['time_index'].iloc[0], q4_data['rice_yield_true'].iloc[0]),
-                           xytext=(5, 5), textcoords='offset points',
-                           fontsize=8, bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+        mask = test_index['year'] == year
+        if mask.sum() > 0:
+            year_actual.append(y_true[mask].mean())
+            year_pred.append(y_pred[mask].mean())
+            year_labels.append(str(year))
+    
+    if year_actual:
+        x = np.arange(len(years))
+        axes[1, 1].bar(x - width/2, year_actual, width, label='Actual', alpha=0.8)
+        axes[1, 1].bar(x + width/2, year_pred, width, label='Predicted', alpha=0.8)
+        axes[1, 1].set_xlabel('Year')
+        axes[1, 1].set_ylabel('Mean Yield (t/ha)')
+        axes[1, 1].set_title('Mean Yield by Year')
+        axes[1, 1].set_xticks(x)
+        axes[1, 1].set_xticklabels(year_labels)
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
     
     plt.tight_layout()
     
-    # Save figure
-    output_path = os.path.join(output_dir, f'viz_yield_timeseries_{model_name}.png')
-    plt.savefig(output_path, dpi=200, bbox_inches='tight')
+    # Save plot
+    plot_path = os.path.join(output_dir, f"viz_yield_seasonal_{model_name}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close()
-    
-    print(f"Saved time series plot: {output_path}")
+    print(f"Saved seasonal analysis plot: {plot_path}")
 
 
-def create_parity_plot(data, model_name, output_dir, test_start, test_end):
-    """Create parity (y=x) scatter plot."""
-    fig, ax = plt.subplots(figsize=(8, 8))
-    
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
-    
-    # Create color map for quarters
-    colors = plt.cm.Set1(np.linspace(0, 1, 4))
-    quarter_colors = {1: colors[0], 2: colors[1], 3: colors[2], 4: colors[3]}
-    
-    # Scatter plot by quarter
-    for quarter in range(1, 5):
-        quarter_data = test_data[test_data['quarter'] == quarter]
-        if len(quarter_data) > 0:
-            ax.scatter(quarter_data['rice_yield_true'], quarter_data['rice_yield_pred'],
-                      c=[quarter_colors[quarter]], s=60, alpha=0.7, 
-                      label=f'Q{quarter}', edgecolors='black', linewidth=0.5)
-    
-    # Add y=x reference line
-    min_val = min(test_data['rice_yield_true'].min(), test_data['rice_yield_pred'].min())
-    max_val = max(test_data['rice_yield_true'].max(), test_data['rice_yield_pred'].max())
-    ax.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.5, label='y=x')
-    
-    # Compute and display metrics
-    metrics = compute_metrics(test_data['rice_yield_true'], test_data['rice_yield_pred'])
-    
-    # Add metrics text box
-    metrics_text = f'RMSE: {metrics["rmse"]:.3f}\nMAE: {metrics["mae"]:.3f}\nR²: {metrics["r2"]:.3f}\nMAPE: {metrics["mape"]:.1f}%'
-    ax.text(0.05, 0.95, metrics_text, transform=ax.transAxes, fontsize=10,
-            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
-    # Formatting
-    ax.set_title(f'Rice Yield Parity Plot — {model_name.upper()} — Test {test_start}-{test_end}', 
-                 fontsize=14, fontweight='bold')
-    ax.set_xlabel('True Rice Yield (t/ha)')
-    ax.set_ylabel('Predicted Rice Yield (t/ha)')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # Set equal aspect ratio
-    ax.set_aspect('equal', adjustable='box')
-    
-    plt.tight_layout()
-    
-    # Save figure
-    output_path = os.path.join(output_dir, f'viz_yield_parity_{model_name}.png')
-    plt.savefig(output_path, dpi=200, bbox_inches='tight')
-    plt.close()
-    
-    print(f"Saved parity plot: {output_path}")
-
-
-def create_residuals_plot(data, model_name, output_dir, test_start, test_end):
-    """Create residual diagnostics plot."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-    
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
-    
-    # Compute residuals
-    test_data['residuals'] = test_data['rice_yield_pred'] - test_data['rice_yield_true']
-    test_data['time_index'] = test_data['year'] + (test_data['quarter'] - 1) / 4
-    
-    # Subplot A: Residuals vs Time
-    ax1.plot(test_data['time_index'], test_data['residuals'], 'o-', linewidth=1.5, markersize=4)
-    ax1.axhline(y=0, color='red', linestyle='--', alpha=0.7)
-    
-    # Annotate largest absolute residuals
-    largest_residuals = test_data.loc[test_data['residuals'].abs().nlargest(3).index]
-    for _, row in largest_residuals.iterrows():
-        ax1.annotate(f'{row["year"]}-Q{row["quarter"]}', 
-                    xy=(row['time_index'], row['residuals']),
-                    xytext=(5, 5), textcoords='offset points',
-                    fontsize=8, bbox=dict(boxstyle='round,pad=0.2', facecolor='yellow', alpha=0.7))
-    
-    ax1.set_title('Residuals vs Time')
-    ax1.set_xlabel('Year')
-    ax1.set_ylabel('Residuals (t/ha)')
-    ax1.grid(True, alpha=0.3)
-    
-    # Format x-axis
-    years = range(test_start, test_end + 1)
-    ax1.set_xticks([y + 0.5 for y in years])
-    ax1.set_xticklabels([str(y) for y in years])
-    
-    # Subplot B: Residuals vs Predicted
-    ax2.scatter(test_data['rice_yield_pred'], test_data['residuals'], alpha=0.6, s=50)
-    ax2.axhline(y=0, color='red', linestyle='--', alpha=0.7)
-    
-    # Add trend line
-    if LOWESS_AVAILABLE:
-        # Use LOWESS smoothing
-        lowess_result = lowess(test_data['residuals'], test_data['rice_yield_pred'], 
-                              frac=0.3, it=3)
-        ax2.plot(lowess_result[:, 0], lowess_result[:, 1], 'g-', linewidth=2, label='LOWESS')
+def plot_feature_importance(model, feature_names: list, model_name: str, output_dir: str):
+    """Plot feature importance for tree-based models"""
+    if hasattr(model, 'feature_importances_'):
+        # For tree-based models
+        importances = model.feature_importances_
+    elif hasattr(model, 'named_steps') and 'regressor' in model.named_steps:
+        # For pipeline models
+        regressor = model.named_steps['regressor']
+        if hasattr(regressor, 'coef_'):
+            importances = np.abs(regressor.coef_)
+        else:
+            print(f"No feature importance available for {model_name}")
+            return
     else:
-        # Use simple moving average
-        sorted_data = test_data.sort_values('rice_yield_pred')
-        window_size = max(3, len(sorted_data) // 10)
-        ma_residuals = sorted_data['residuals'].rolling(window=window_size, center=True).mean()
-        ax2.plot(sorted_data['rice_yield_pred'], ma_residuals, 'g-', linewidth=2, label='Moving Avg')
-    
-    ax2.set_title('Residuals vs Predicted Values')
-    ax2.set_xlabel('Predicted Rice Yield (t/ha)')
-    ax2.set_ylabel('Residuals (t/ha)')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    plt.suptitle(f'Residual Diagnostics — {model_name.upper()} — Test {test_start}-{test_end}', 
-                 fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    
-    # Save figure
-    output_path = os.path.join(output_dir, f'viz_yield_residuals_{model_name}.png')
-    plt.savefig(output_path, dpi=200, bbox_inches='tight')
-    plt.close()
-    
-    print(f"Saved residuals plot: {output_path}")
-
-
-def create_seasonal_plot(data, model_name, output_dir, test_start, test_end):
-    """Create seasonal distributions plot."""
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
-    
-    # Prepare data for boxplot
-    plot_data = []
-    labels = []
-    colors = []
-    
-    for quarter in range(1, 5):
-        quarter_data = test_data[test_data['quarter'] == quarter]
-        if len(quarter_data) > 0:
-            # True values
-            plot_data.append(quarter_data['rice_yield_true'].values)
-            labels.append(f'Q{quarter} True')
-            colors.append('lightblue')
-            
-            # Predicted values
-            plot_data.append(quarter_data['rice_yield_pred'].values)
-            labels.append(f'Q{quarter} Pred')
-            colors.append('lightcoral')
-    
-    # Create boxplot
-    bp = ax.boxplot(plot_data, tick_labels=labels, patch_artist=True)
-    
-    # Color the boxes
-    for patch, color in zip(bp['boxes'], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.7)
-    
-    # Add median markers
-    for i, data_values in enumerate(plot_data):
-        median_val = np.median(data_values)
-        ax.plot([i+1], [median_val], 'ko', markersize=6, zorder=5)
-    
-    # Add per-quarter MAE annotations
-    for quarter in range(1, 5):
-        quarter_data = test_data[test_data['quarter'] == quarter]
-        if len(quarter_data) > 0:
-            mae = mean_absolute_error(quarter_data['rice_yield_true'], quarter_data['rice_yield_pred'])
-            ax.text(quarter * 2 - 0.5, ax.get_ylim()[1] * 0.95, f'MAE: {mae:.3f}', 
-                   ha='center', fontsize=8, bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8))
-    
-    ax.set_title(f'Seasonal Rice Yield Distributions — {model_name.upper()} — Test {test_start}-{test_end}', 
-                 fontsize=14, fontweight='bold')
-    ax.set_ylabel('Rice Yield (t/ha)')
-    ax.grid(True, alpha=0.3)
-    
-    # Rotate x-axis labels
-    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-    
-    plt.tight_layout()
-    
-    # Save figure
-    output_path = os.path.join(output_dir, f'viz_yield_seasonal_{model_name}.png')
-    plt.savefig(output_path, dpi=200, bbox_inches='tight')
-    plt.close()
-    
-    print(f"Saved seasonal plot: {output_path}")
-
-
-def save_metrics(data, model_name, output_dir, test_start, test_end):
-    """Save metrics to CSV file."""
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
-    
-    # Compute metrics
-    metrics = compute_metrics(test_data['rice_yield_true'], test_data['rice_yield_pred'])
-    
-    # Create metrics DataFrame
-    metrics_df = pd.DataFrame([{
-        'model_name': model_name,
-        'test_start': test_start,
-        'test_end': test_end,
-        'n_points': metrics['n_points'],
-        'rmse': metrics['rmse'],
-        'mae': metrics['mae'],
-        'r2': metrics['r2'],
-        'mape': metrics['mape']
-    }])
-    
-    # Save to CSV
-    output_path = os.path.join(output_dir, f'metrics_{model_name}.csv')
-    metrics_df.to_csv(output_path, index=False)
-    
-    print(f"Saved metrics: {output_path}")
-    print(f"Metrics for {model_name.upper()}:")
-    print(f"  RMSE: {metrics['rmse']:.3f} t/ha")
-    print(f"  MAE: {metrics['mae']:.3f} t/ha")
-    print(f"  R²: {metrics['r2']:.3f}")
-    print(f"  MAPE: {metrics['mape']:.1f}%")
-
-
-def check_sample_predictions(output_dir, model_name):
-    """Check if sample predictions exist and create quick visualizations."""
-    sample_path = os.path.join(output_dir, "sample", f"sample_predictions_{model_name}.csv")
-    
-    if not os.path.exists(sample_path):
+        print(f"No feature importance available for {model_name}")
         return
     
-    print(f"Found sample predictions: {sample_path}")
-    print("Creating sample visualizations...")
+    # Create feature importance DataFrame
+    feature_importance_df = pd.DataFrame({
+        'feature': feature_names,
+        'importance': importances
+    }).sort_values('importance', ascending=False)
     
+    # Plot top 20 features
+    top_features = feature_importance_df.head(20)
+    
+    plt.figure(figsize=(12, 8))
+    bars = plt.barh(range(len(top_features)), top_features['importance'])
+    plt.yticks(range(len(top_features)), top_features['feature'])
+    plt.xlabel('Feature Importance')
+    plt.title(f'{model_name.upper()} - Feature Importance')
+    plt.gca().invert_yaxis()
+    plt.grid(True, alpha=0.3)
+    
+    # Add value labels on bars
+    for i, bar in enumerate(bars):
+        width = bar.get_width()
+        plt.text(width, bar.get_y() + bar.get_height()/2, f'{width:.3f}', 
+                ha='left', va='center', fontsize=8)
+    
+    plt.tight_layout()
+    
+    # Save plot
+    plot_path = os.path.join(output_dir, f"viz_feature_importance_{model_name}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved feature importance plot: {plot_path}")
+
+
+def create_comprehensive_visualizations(config_path: str, model_name: str):
+    """Create all visualizations for a specific model"""
+    cfg = load_config(config_path)
+    output_dir = cfg['paths']['output_dir']
+    
+    print(f"Creating visualizations for {model_name}...")
+    
+    # Load predictions
     try:
-        # Load sample data
-        sample_data = pd.read_csv(sample_path)
-        
-        if 'rice_yield' in sample_data.columns:
-            sample_data = sample_data.rename(columns={'rice_yield': 'rice_yield_pred'})
-        
-        # Create quick time series plot
-        fig, ax = plt.subplots(figsize=(10, 5))
-        
-        if 'year' in sample_data.columns and 'quarter' in sample_data.columns:
-            sample_data['time_index'] = sample_data['year'] + (sample_data['quarter'] - 1) / 4
+        predictions_df = load_predictions(output_dir, model_name)
+    except FileNotFoundError:
+        print(f"Predictions file not found for {model_name}. Skipping visualizations.")
+        return
+    
+    # Load actual data for comparison
+    ds, pre, train_df, test_df = prepare_datasets(cfg)
+    
+    # Extract actual and predicted values
+    y_true = ds.y_test
+    y_pred = predictions_df['rice_yield'].values
+    
+    # Create visualizations
+    plot_yield_parity(y_true, y_pred, model_name, output_dir)
+    plot_residuals(y_true, y_pred, ds.test_index, model_name, output_dir)
+    plot_temporal_analysis(ds.test_index, y_true, y_pred, model_name, output_dir)
+    plot_seasonal_analysis(ds.test_index, y_true, y_pred, model_name, output_dir)
+    
+    # Try to load and plot feature importance if model is available
+    try:
+        # Load the trained model
+        import joblib
+        model_files = [f for f in os.listdir(cfg['paths']['models_dir']) 
+                      if f.startswith(model_name) and f.endswith('.joblib')]
+        if model_files:
+            # Load the most recent model
+            model_files.sort()
+            model_path = os.path.join(cfg['paths']['models_dir'], model_files[-1])
+            model = joblib.load(model_path)
             
-            if 'rice_yield_true' in sample_data.columns:
-                ax.plot(sample_data['time_index'], sample_data['rice_yield_true'], 
-                       'o-', linewidth=2, markersize=6, label='True', color='blue')
+            # For GridSearchCV, extract the best estimator
+            if hasattr(model, 'best_estimator_'):
+                model = model.best_estimator_
             
-            ax.plot(sample_data['time_index'], sample_data['rice_yield_pred'], 
-                   's--', linewidth=2, markersize=6, label='Predicted', color='red')
-        
-        ax.set_title(f'Sample Rice Yield Predictions — {model_name.upper()}')
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Rice Yield (t/ha)')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        # Save sample plot
-        sample_output_path = os.path.join(output_dir, "sample", f"sample_viz_yield_timeseries_{model_name}.png")
-        plt.savefig(sample_output_path, dpi=200, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Saved sample time series plot: {sample_output_path}")
-        
+            # For pipeline models, get feature names from preprocessor
+            feature_names = pre.feature_columns_
+            plot_feature_importance(model, feature_names, model_name, output_dir)
     except Exception as e:
-        print(f"Warning: Error creating sample visualizations: {e}")
+        print(f"Could not create feature importance plot: {e}")
+    
+    print(f"All visualizations completed for {model_name}")
 
 
 def main():
-    """Main function."""
-    # Parse arguments
-    args = parse_arguments()
+    parser = argparse.ArgumentParser(description='Create comprehensive visualizations for rice yield predictions')
+    parser.add_argument('--config', type=str, required=True, help='Path to config.yaml')
+    parser.add_argument('--model', type=str, choices=['mlr', 'rf', 'gbr', 'all'], 
+                       default='all', help='Model to visualize (default: all)')
+    args = parser.parse_args()
     
-    # Load configuration
-    config = load_config(args.config)
+    if args.model == 'all':
+        models = ['mlr', 'rf', 'gbr']
+    else:
+        models = [args.model]
     
-    # Extract paths and parameters
-    data_dir = config['paths']['data_dir']
-    output_dir = config['paths']['output_dir']
-    test_start = config['split_years']['test_start']
-    test_end = config['split_years']['test_end']
-    model_name = args.model_name
+    for model_name in models:
+        try:
+            create_comprehensive_visualizations(args.config, model_name)
+        except Exception as e:
+            print(f"Error creating visualizations for {model_name}: {e}")
     
-    # Print configuration
-    print("=" * 60)
-    print("RICE YIELD PREDICTION VISUALIZATION")
-    print("=" * 60)
-    print(f"Configuration file: {args.config}")
-    print(f"Model name: {model_name}")
-    print(f"Data directory: {data_dir}")
-    print(f"Output directory: {output_dir}")
-    print(f"Test period: {test_start}-{test_end}")
-    print(f"Seaborn available: {SEABORN_AVAILABLE}")
-    print(f"LOWESS available: {LOWESS_AVAILABLE}")
-    print("=" * 60)
-    
-    # Setup plotting style
-    setup_plotting_style()
-    
-    # Load data
-    print("\nLoading data...")
-    ground_truth = load_ground_truth(data_dir)
-    predictions = load_predictions(output_dir, model_name)
-    disasters = load_disasters(data_dir)
-    
-    # Merge data
-    print("\nMerging data...")
-    data = ground_truth.merge(predictions, on=['year', 'quarter'], how='inner')
-    
-    if disasters is not None:
-        data = data.merge(disasters, on=['year', 'quarter'], how='left')
-        data['is_sty_quarter'] = data['is_sty_quarter'].fillna(0)
-    
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
-    
-    print(f"Test data points: {len(test_data)}")
-    print(f"Test data range: {test_data['year'].min()}-{test_data['year'].max()}")
-    
-    if len(test_data) == 0:
-        print("Error: No test data points found.")
-        sys.exit(1)
-    
-    # Create visualizations
-    print("\nCreating visualizations...")
-    
-    # Time series plot
-    create_time_series_plot(data, model_name, output_dir, test_start, test_end)
-    
-    # Parity plot
-    create_parity_plot(data, model_name, output_dir, test_start, test_end)
-    
-    # Residuals plot
-    create_residuals_plot(data, model_name, output_dir, test_start, test_end)
-    
-    # Seasonal plot
-    create_seasonal_plot(data, model_name, output_dir, test_start, test_end)
-    
-    # Save metrics
-    save_metrics(data, model_name, output_dir, test_start, test_end)
-    
-    # Check for sample predictions
-    check_sample_predictions(output_dir, model_name)
-    
-    print("\n" + "=" * 60)
-    print("VISUALIZATION COMPLETE")
-    print("=" * 60)
-    print(f"All figures saved to: {output_dir}")
-    print(f"Metrics saved to: {output_dir}/metrics_{model_name}.csv")
-    print("=" * 60)
+    print("Visualization process completed!")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

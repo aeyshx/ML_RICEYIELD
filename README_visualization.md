@@ -1,123 +1,207 @@
-# Rice Yield Prediction Visualization
+# Rice Yield Prediction Visualization and Diagnostics
 
-This script (`viz_yield_predictions.py`) creates comprehensive visualizations for rice yield model predictions versus ground truth data.
+This document describes the comprehensive visualization and diagnostic capabilities added to the rice yield prediction system.
 
-## Features
+## Overview
 
-- **Time Series Analysis**: Quarterly rice yield predictions vs ground truth over time
-- **Parity Plots**: Scatter plots with y=x reference line and metrics
-- **Residual Diagnostics**: Residual analysis with trend lines
-- **Seasonal Analysis**: Box plots showing seasonal distributions
-- **STY Event Highlighting**: Optional highlighting of Super Typhoon quarters
-- **Metrics Export**: CSV files with RMSE, MAE, R², and MAPE metrics
+The enhanced system now includes sophisticated visualization tools to analyze model performance, understand feature importance, and diagnose prediction patterns across different temporal and seasonal contexts.
+
+## Key Improvements Implemented
+
+### 1. Enhanced Feature Engineering
+- **Temperature Range Features**: Added `temp_range` (max - min) and `temp_mean` for better heat stress modeling
+- **Multi-Quarter Lags**: Implemented 1, 2, and 3-quarter lags for climate variables to capture cumulative effects
+- **Rolling Aggregates**: Added 2Q and 3Q rolling means for rainfall, humidity, and temperature
+- **Enhanced Typhoon Features**: Extended from binary STY flag to include `sty_count`, `storm_count`, and `msw_max`
+
+### 2. Time-Series Cross-Validation
+- **TimeSeriesSplit**: Implemented proper time-series cross-validation to prevent data leakage
+- **GridSearchCV**: Added hyperparameter tuning for Random Forest and Gradient Boosting models
+- **Configurable Parameters**: All tuning parameters configurable via `config.yaml`
+
+### 3. Model Regularization
+- **Ridge/Lasso/ElasticNet**: Added regularization options for linear models
+- **StandardScaler**: Implemented preprocessing pipeline for better coefficient stability
+- **Configurable Alpha**: Regularization strength configurable via config
+
+### 4. Comprehensive Diagnostics
+- **Per-Quarter Metrics**: Performance analysis by quarter to identify seasonal patterns
+- **Per-Typhoon Metrics**: Performance analysis for typhoon vs non-typhoon quarters
+- **Detailed Residual Analysis**: Comprehensive residual diagnostics and visualization
+
+## Visualization Types
+
+### 1. Yield Parity Plots (`viz_yield_parity_*.png`)
+- **Purpose**: Compare actual vs predicted yields
+- **Features**: 
+  - Scatter plot with perfect prediction line
+  - RMSE, MAE, and R² metrics displayed
+  - Clear visualization of prediction accuracy
+
+### 2. Residual Analysis (`viz_yield_residuals_*.png`)
+- **Purpose**: Diagnose prediction errors and patterns
+- **Features**:
+  - Residuals vs predicted values
+  - Residual distribution histogram
+  - Residuals by quarter (seasonal patterns)
+  - Residuals by typhoon impact (shock analysis)
+
+### 3. Temporal Analysis (`viz_yield_timeseries_*.png`)
+- **Purpose**: Analyze predictions over time
+- **Features**:
+  - Time series of actual vs predicted yields
+  - Residuals over time to identify trends
+  - Temporal pattern identification
+
+### 4. Seasonal Analysis (`viz_yield_seasonal_*.png`)
+- **Purpose**: Understand seasonal patterns and variability
+- **Features**:
+  - Mean yield by quarter (actual vs predicted)
+  - Yield variability by quarter
+  - Box plots showing distribution by quarter
+  - Year-over-year comparison
+
+### 5. Feature Importance (`viz_feature_importance_*.png`)
+- **Purpose**: Understand which features drive predictions
+- **Features**:
+  - Top 20 most important features
+  - Importance scores for tree-based models
+  - Coefficient magnitudes for linear models
 
 ## Usage
 
+### Running Visualizations
+
 ```bash
-# Basic usage
-python viz_yield_predictions.py --config config.yaml --model_name mlr
-python viz_yield_predictions.py --config config.yaml --model_name rf
-python viz_yield_predictions.py --config config.yaml --model_name gbr
+# Create visualizations for all models
+python viz_yield_predictions.py --config config.yaml --model all
+
+# Create visualizations for specific model
+python viz_yield_predictions.py --config config.yaml --model rf
+python viz_yield_predictions.py --config config.yaml --model gbr
+python viz_yield_predictions.py --config config.yaml --model mlr
 ```
 
-## Input Requirements
+### Configuration Options
 
-### Required Files
-- `config.yaml`: Configuration file with paths and parameters
-- `data/AGRICULTURE.csv`: Ground truth data with rice yield information
-- `outputs/predictions_[model].csv`: Model predictions for the specified model
+The visualization system respects all configuration options in `config.yaml`:
 
-### Optional Files
-- `data/DISASTERS.csv`: Disaster events for STY quarter highlighting
+```yaml
+features:
+  use_quarter_dummies: true
+  use_multi_quarter_lags: true
+  use_rolling_features: true
+  use_enhanced_typhoon: true
+
+models:
+  rf:
+    use_hyperparameter_tuning: true
+    n_splits: 5
+    n_estimators: [100, 200, 300, 500]
+    max_depth: [None, 5, 10, 15]
+  
+  gbr:
+    use_hyperparameter_tuning: true
+    n_splits: 5
+    loss: ['squared_error', 'huber']
+    
+  mlr:
+    use_regularization: true
+    regularization_type: 'ridge'
+    alpha: 1.0
+```
 
 ## Output Files
 
-For each model, the script generates:
+### Predictions and Metrics
+- `predictions_[model].csv`: Test period predictions with actual values
+- `summary_[model].csv`: Basic summary statistics
+- `metrics_[model].csv`: Detailed metrics including per-quarter and per-typhoon analysis
 
-### Visualization Files
-- `viz_yield_timeseries_[model].png`: Time series overlay plot
-- `viz_yield_parity_[model].png`: Parity scatter plot with metrics
-- `viz_yield_residuals_[model].png`: Residual diagnostics
-- `viz_yield_seasonal_[model].png`: Seasonal distribution analysis
+### Visualizations
+- `viz_yield_parity_[model].png`: Actual vs predicted comparison
+- `viz_yield_residuals_[model].png`: Comprehensive residual analysis
+- `viz_yield_timeseries_[model].png`: Temporal analysis
+- `viz_yield_seasonal_[model].png`: Seasonal pattern analysis
+- `viz_feature_importance_[model].png`: Feature importance ranking
 
-### Metrics Files
-- `metrics_[model].csv`: Performance metrics (RMSE, MAE, R², MAPE)
+## Diagnostic Insights
 
-### Sample Visualizations (if available)
-- `sample/sample_viz_yield_timeseries_[model].png`: Sample data visualizations
+### 1. Seasonal Performance Analysis
+The system automatically analyzes performance by quarter to identify:
+- Which quarters are hardest to predict
+- Seasonal bias in predictions
+- Impact of growing season vs harvest season
 
-## Configuration
+### 2. Typhoon Impact Analysis
+Enhanced typhoon features help identify:
+- Performance during typhoon quarters
+- Whether typhoon intensity features improve predictions
+- Residual patterns during extreme weather events
 
-The script reads configuration from `config.yaml`:
+### 3. Feature Importance Insights
+Feature importance analysis reveals:
+- Which climate variables are most predictive
+- Impact of lag features on prediction accuracy
+- Relative importance of typhoon features vs climate features
 
-```yaml
-paths:
-  data_dir: data
-  output_dir: outputs
-  models_dir: models
+### 4. Temporal Stability
+Time series analysis shows:
+- Whether model performance degrades over time
+- Systematic over/under-prediction patterns
+- Impact of changing climate patterns
 
-split_years:
-  train_start: 2000
-  train_end: 2018
-  test_start: 2019
-  test_end: 2023
-```
+## Best Practices
 
-## Features
+### 1. Model Comparison
+- Compare visualizations across all three models
+- Look for consistent patterns vs model-specific issues
+- Use feature importance to understand model differences
 
-### Robust Data Parsing
-- Handles thousands separators in numeric data
-- Validates computed rice yield against provided values
-- Graceful handling of missing data
+### 2. Seasonal Analysis
+- Pay special attention to Q2-Q3 (growing season) vs Q4-Q1 (harvest season)
+- Check if rolling features improve seasonal predictions
+- Verify that lag features align with crop calendar
 
-### Advanced Visualizations
-- Color-blind friendly palettes
-- High-resolution output (200 DPI)
-- Professional styling with Seaborn (if available)
-- LOWESS trend lines for residual analysis
+### 3. Typhoon Analysis
+- Compare performance during typhoon vs non-typhoon quarters
+- Check if enhanced typhoon features improve predictions
+- Look for systematic bias during extreme weather
 
-### STY Event Integration
-- Automatically detects Super Typhoon quarters
-- Highlights STY events in time series plots
-- Provides STY quarter annotations
+### 4. Feature Engineering Validation
+- Use feature importance to validate new features
+- Check if multi-quarter lags provide value
+- Verify that rolling aggregates capture meaningful patterns
 
-### Error Handling
-- Clear error messages for missing files
-- Graceful degradation for optional dependencies
-- Validation of data integrity
+## Troubleshooting
 
-## Dependencies
+### Common Issues
 
-### Required
-- Python 3.7+
-- pandas
-- numpy
-- matplotlib
-- scikit-learn
-- PyYAML
+1. **Missing Predictions File**: Ensure models have been trained first
+2. **No Feature Importance**: Some models (e.g., standard LinearRegression) don't provide feature importance
+3. **Empty Visualizations**: Check if test period has sufficient data
+4. **Memory Issues**: Large datasets may require reducing plot resolution
 
-### Optional
-- seaborn (for enhanced styling)
-- statsmodels (for LOWESS smoothing)
+### Performance Tips
 
-## Example Output
+1. **Parallel Processing**: Use `n_jobs=-1` for faster hyperparameter tuning
+2. **Reduced Grid Search**: Start with smaller parameter grids for faster iteration
+3. **Selective Visualization**: Use `--model` flag to create only needed visualizations
 
-The script provides detailed console output showing:
-- Configuration summary
-- Data loading statistics
-- STY quarter detection
-- Test data points and range
-- Generated file paths
-- Model performance metrics
+## Future Enhancements
 
-## Model Performance Summary
+### Planned Features
+1. **Interactive Dashboards**: Web-based interactive visualizations
+2. **Automated Reporting**: PDF reports with key insights
+3. **Model Comparison Tools**: Side-by-side model performance comparison
+4. **Anomaly Detection**: Automatic identification of prediction anomalies
 
-Based on the test results (2019-2023):
+### Research Directions
+1. **Ensemble Methods**: Combine predictions from multiple models
+2. **Deep Learning**: Explore neural network approaches
+3. **Causal Inference**: Understand causal relationships between features and yield
+4. **Uncertainty Quantification**: Provide prediction confidence intervals
 
-| Model | RMSE (t/ha) | MAE (t/ha) | R² | MAPE (%) |
-|-------|-------------|------------|----|----------|
-| MLR   | 0.690       | 0.600      | -2.008 | 15.2 |
-| RF    | 0.734       | 0.663      | -2.408 | 16.2 |
-| GBR   | 0.747       | 0.651      | -2.524 | 16.0 |
+## Conclusion
 
-Note: Negative R² values indicate that the models perform worse than a simple mean prediction, suggesting potential overfitting or data issues.
+The enhanced visualization and diagnostic system provides comprehensive tools for understanding model performance, identifying improvement opportunities, and validating feature engineering decisions. The combination of enhanced features, proper time-series validation, and detailed diagnostics creates a robust framework for rice yield prediction.
