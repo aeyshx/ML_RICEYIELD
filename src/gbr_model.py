@@ -21,7 +21,26 @@ def main(config_path: str) -> None:
 
     ds, pre, train_df, test_df = prepare_datasets(cfg)
 
-    model = GradientBoostingRegressor(random_state=cfg.get('random_state', 42))
+    # Get GBR-specific configuration
+    gbr_config = cfg.get('models', {}).get('gbr', {})
+    
+    # Create model with configured hyperparameters
+    model = GradientBoostingRegressor(
+        n_estimators=gbr_config.get('n_estimators', 100),
+        learning_rate=gbr_config.get('learning_rate', 0.1),
+        max_depth=gbr_config.get('max_depth', 3),
+        min_samples_split=gbr_config.get('min_samples_split', 2),
+        min_samples_leaf=gbr_config.get('min_samples_leaf', 1),
+        subsample=gbr_config.get('subsample', 1.0),
+        max_features=gbr_config.get('max_features', None),
+        loss=gbr_config.get('loss', 'squared_error'),
+        random_state=cfg.get('random_state', 42)
+    )
+    
+    print(f"Training GBR with config: n_estimators={gbr_config.get('n_estimators', 100)}, "
+          f"learning_rate={gbr_config.get('learning_rate', 0.1)}, "
+          f"max_depth={gbr_config.get('max_depth', 3)}")
+    
     model.fit(ds.X_train, ds.y_train)
 
     preds = model.predict(ds.X_test)
@@ -31,8 +50,13 @@ def main(config_path: str) -> None:
     r2 = r2_score(ds.y_test, preds)
     print(f"Test RMSE: {rmse:.4f} | MAE: {mae:.4f} | R2: {r2:.4f}")
 
-    model_path = save_model(model, cfg['paths']['models_dir'], 'gbr')
-    print(f"Saved model to: {model_path}")
+    # Check if model should be saved
+    should_save = gbr_config.get('save_model', cfg.get('models', {}).get('save_model', True))
+    if should_save:
+        model_path = save_model(model, cfg['paths']['models_dir'], 'gbr')
+        print(f"Saved model to: {model_path}")
+    else:
+        print("Model saving skipped (configured to not save)")
 
     pred_path, summary_path = write_predictions_and_summary(ds.test_index, preds, cfg['paths']['output_dir'], 'gbr')
     print(f"Wrote predictions: {pred_path}")

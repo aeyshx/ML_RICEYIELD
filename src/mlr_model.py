@@ -21,7 +21,14 @@ def main(config_path: str) -> None:
 
     ds, pre, train_df, test_df = prepare_datasets(cfg)
 
+    # Get MLR-specific configuration
+    mlr_config = cfg.get('models', {}).get('mlr', {})
+    
+    # Create model (LinearRegression has no hyperparameters to configure)
     model = LinearRegression()
+    
+    print("Training Multiple Linear Regression")
+    
     model.fit(ds.X_train, ds.y_train)
 
     preds = model.predict(ds.X_test)
@@ -31,8 +38,13 @@ def main(config_path: str) -> None:
     r2 = r2_score(ds.y_test, preds)
     print(f"Test RMSE: {rmse:.4f} | MAE: {mae:.4f} | R2: {r2:.4f}")
 
-    model_path = save_model(model, cfg['paths']['models_dir'], 'mlr')
-    print(f"Saved model to: {model_path}")
+    # Check if model should be saved
+    should_save = mlr_config.get('save_model', cfg.get('models', {}).get('save_model', True))
+    if should_save:
+        model_path = save_model(model, cfg['paths']['models_dir'], 'mlr')
+        print(f"Saved model to: {model_path}")
+    else:
+        print("Model saving skipped (configured to not save)")
 
     pred_path, summary_path = write_predictions_and_summary(ds.test_index, preds, cfg['paths']['output_dir'], 'mlr')
     print(f"Wrote predictions: {pred_path}")
