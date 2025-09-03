@@ -607,12 +607,7 @@ def create_feature_importance_plot(model, model_name, output_dir, data_dir):
         ax.text(bar.get_width() + 0.001, bar.get_y() + bar.get_height()/2, 
                 f'{importance:.3f}', ha='left', va='center', fontsize=9)
     
-    # Highlight key features mentioned by user
-    key_features = ['rainfall', 'min_temperature', 'max_temperature', 'typhoon_impact']
-    for i, feature in enumerate(importance_df['feature']):
-        if any(key_feat in feature for key_feat in key_features):
-            bars[i].set_color('orange')
-            bars[i].set_alpha(0.8)
+    # All features use consistent color (no highlighting)
     
     plt.tight_layout()
     

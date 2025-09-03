@@ -26,9 +26,9 @@ Target: rice_yield = produced_rice / area_harvested (t/ha), validated against pr
 - Python 3.13.5 recommended with modern NumPy/Pandas/scikit-learn pins.
 - Install dependencies from requirements.txt.
 - Train/evaluate models:
-  - `python src/mlr_model.py --config config.yaml`
-  - `python src/rf_model.py --config config.yaml`
-  - `python src/gbr_model.py --config config.yaml`
+  python src/mlr_model.py --config config.yaml
+  python src/rf_model.py --config config.yaml
+  python src/gbr_model.py --config config.yaml
 
 ### Outputs
 - Predictions (test rows only): outputs/predictions_[model].csv with columns [year, quarter, produced_rice, area_harvested, rice_yield]
