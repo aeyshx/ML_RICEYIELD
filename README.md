@@ -14,11 +14,9 @@ Join keys: year, quarter (all rows are Albay-wide and temporally aligned).
 - Test: 2019–2023
 
 ### Features
-- rainfall, min_temperature, max_temperature, relative_humidity, wind_speed
-- wind_dir_sin, wind_dir_cos (from cleaned circular wind_direction)
-- quarter dummies (configurable)
-- typhoon_impact (1 if typhoon present based on typhoon_impact_rule)
-- optional one-quarter lag for climate features
+- rainfall, min_temperature, max_temperature, relative_humidity
+- typhoon_impact (1 if any storm event exists in that quarter, else 0)
+- msw_max_per_quarter (max msw for that quarter, 0 if no events, computed from all storm types TD/TS/STS/TY/STY)
 
 Target: rice_yield = produced_rice / area_harvested (t/ha), validated against provided column when close.
 
@@ -26,9 +24,9 @@ Target: rice_yield = produced_rice / area_harvested (t/ha), validated against pr
 - Python 3.13.5 recommended with modern NumPy/Pandas/scikit-learn pins.
 - Install dependencies from requirements.txt.
 - Train/evaluate models:
-  python src/mlr_model.py --config config.yaml
-  python src/rf_model.py --config config.yaml
-  python src/gbr_model.py --config config.yaml
+  - `python src/mlr_model.py --config config.yaml`
+  - `python src/rf_model.py --config config.yaml`
+  - `python src/gbr_model.py --config config.yaml`
 
 ### Outputs
 - Predictions (test rows only): outputs/predictions_[model].csv with columns [year, quarter, produced_rice, area_harvested, rice_yield]
@@ -41,5 +39,10 @@ Target: rice_yield = produced_rice / area_harvested (t/ha), validated against pr
 - Control model saving and sample creation via `output.save_model` and `output.create_sample` settings.
 
 ### Notes
-- Typhoon impact configurable via typhoon_impact_rule (STY_only or all_types).
-- Wind direction outside [0,360) treated as missing, imputed by circular mean before sin/cos.
+- Typhoon impact configurable via typhoon_impact_rule (any_event uses all storm types TD/TS/STS/TY/STY).
+- msw_max_per_quarter is computed from all storm types, unit km/h, zero when no event.
+- Wind features, quarter dummies, and lag features are disabled for this iteration.
+
+### Storm features
+- **typhoon_impact**: Binary flag (1 if any storm event present in that quarter, 0 otherwise)
+- **msw_max_per_quarter**: Maximum sustained wind speed (km/h) for that quarter, 0 when no events occur

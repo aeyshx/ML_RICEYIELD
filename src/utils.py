@@ -44,7 +44,6 @@ class Preprocessor:
         self.use_quarter_dummies = use_quarter_dummies
         self.use_one_quarter_lag = use_one_quarter_lag
         self.typhoon_impact_rule = typhoon_impact_rule
-        self.circular_mean_deg_: Optional[float] = None
         self.feature_columns_: List[str] = []
 
     @staticmethod
@@ -67,32 +66,10 @@ class Preprocessor:
         result = result.fillna(computed)
         return result
 
-    @staticmethod
-    def _circular_mean_degrees(valid_angles_deg: np.ndarray) -> float:
-        # valid_angles_deg must already be in [0, 360)
-        if valid_angles_deg.size == 0:
-            # default to 0 degrees if no valid data; sin=0, cos=1
-            return 0.0
-        radians = np.deg2rad(valid_angles_deg)
-        sin_sum = np.sin(radians).sum()
-        cos_sum = np.cos(radians).sum()
-        mean_angle = math.degrees(math.atan2(sin_sum, cos_sum))
-        if mean_angle < 0:
-            mean_angle += 360.0
-        return mean_angle
-
-    @staticmethod
-    def _sanitize_wind_direction(series: pd.Series) -> pd.Series:
-        # Treat outside [0,360) as missing
-        s = pd.to_numeric(series, errors='coerce')
-        s = s.where((s >= 0) & (s < 360))
-        return s
-
     def fit(self, df_joined: pd.DataFrame) -> 'Preprocessor':
-        # Compute circular mean on training set's valid wind directions
-        wind_dir = self._sanitize_wind_direction(df_joined['wind_direction'])
-        valid_angles = wind_dir.dropna().to_numpy(dtype=float)
-        self.circular_mean_deg_ = self._circular_mean_degrees(valid_angles)
+        # No fitting needed for the simplified feature set
+        # Storm features are computed in read_and_join_data
+        # Climate features are handled directly in transform
         return self
 
     def transform(self, df_joined: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
@@ -110,52 +87,19 @@ class Preprocessor:
         df['min_temperature'] = pd.to_numeric(df['min_temperature'], errors='coerce')
         df['max_temperature'] = pd.to_numeric(df['max_temperature'], errors='coerce')
         df['relative_humidity'] = pd.to_numeric(df['relative_humidity'], errors='coerce')
-        df['wind_speed'] = pd.to_numeric(df['wind_speed'], errors='coerce')
 
-        # Wind direction cleaning and circular encoding with imputation
-        wind_dir = self._sanitize_wind_direction(df['wind_direction'])
-        if self.circular_mean_deg_ is None:
-            self.circular_mean_deg_ = 0.0
-        wind_dir = wind_dir.fillna(self.circular_mean_deg_)
-        radians = np.deg2rad(wind_dir.astype(float))
-        df['wind_dir_sin'] = np.sin(radians)
-        df['wind_dir_cos'] = np.cos(radians)
+        # Storm features are already computed in read_and_join_data
+        # typhoon_impact: 1 if any storm event exists in that quarter, else 0
+        # msw_max_per_quarter: max msw for that quarter, 0 if no events
 
-        # Typhoon impact: 1 if typhoon appears in that quarter based on rule, else 0
-        if self.typhoon_impact_rule == 'STY_only':
-            df['typhoon_impact'] = (df['type'].astype(str).str.upper() == 'STY').astype(int)
-        elif self.typhoon_impact_rule == 'all_types':
-            # Include all typhoon types: TD, TS, STS, TY, STY
-            typhoon_types = ['TD', 'TS', 'STS', 'TY', 'STY']
-            df['typhoon_impact'] = df['type'].astype(str).str.upper().isin(typhoon_types).astype(int)
-        else:
-            raise ValueError(f"Unknown typhoon_impact_rule: {self.typhoon_impact_rule}")
-
-        # Quarter features
-        if self.use_quarter_dummies:
-            quarter_dummies = pd.get_dummies(df['quarter'], prefix='q', dtype=int)
-            df = pd.concat([df, quarter_dummies], axis=1)
-
-        # Optional one-quarter lag of climate features to reflect harvest timing
-        if self.use_one_quarter_lag:
-            lag_cols = ['rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed', 'wind_dir_sin', 'wind_dir_cos']
-            # Sort chronologically and shift for lag features
-            df = df.sort_values(['year', 'quarter']).reset_index(drop=True)
-            for col in lag_cols:
-                df[f'{col}_lag1'] = df[col].shift(1)
-
-        # Final feature set
+        # Final feature set - exactly as specified
         feature_cols = [
-            'rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed',
-            'wind_dir_sin', 'wind_dir_cos', 'typhoon_impact'
+            'rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 
+            'typhoon_impact', 'msw_max_per_quarter'
         ]
-        if self.use_quarter_dummies:
-            feature_cols.extend([c for c in df.columns if c.startswith('q_')])
-        if self.use_one_quarter_lag:
-            feature_cols.extend([f'{c}_lag1' for c in ['rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed', 'wind_dir_sin', 'wind_dir_cos']])
 
         X = df[feature_cols].copy()
-        # Simple imputation for any remaining missing values (e.g., first lag)
+        # Simple imputation for any remaining missing values
         X = X.fillna(X.mean(numeric_only=True))
 
         self.feature_columns_ = list(X.columns)
@@ -180,22 +124,37 @@ def read_and_join_data(data_dir: str, typhoon_impact_rule: str = 'STY_only') -> 
         if 'year' not in df.columns or 'quarter' not in df.columns:
             raise ValueError('All input files must contain year and quarter columns')
 
-    # Reduce disasters to per-quarter typhoon presence based on rule
+    # Process disasters to create quarter-level storm features
     disasters['type'] = disasters['type'].astype(str).str.upper()
     
-    if typhoon_impact_rule == 'STY_only':
-        typhoon_flags = (
-            disasters.assign(typhoon_flag=lambda d: (d['type'] == 'STY').astype(int))
-                     .groupby(['year', 'quarter'], as_index=False)['typhoon_flag']
-                     .max()
+    if typhoon_impact_rule == 'any_event':
+        # Group by [year, quarter] across all storm types (TD/TS/STS/TY/STY)
+        # Create msw_max_per_quarter = max(msw) for that quarter
+        # Create typhoon_impact = 1 if any event exists in that quarter, else 0
+        storm_features = (
+            disasters.groupby(['year', 'quarter'], as_index=False)
+            .agg({
+                'msw': 'max',  # max msw per quarter
+                'type': lambda x: 1 if len(x) > 0 else 0  # any event flag
+            })
+            .rename(columns={
+                'msw': 'msw_max_per_quarter',
+                'type': 'typhoon_impact'
+            })
         )
-    elif typhoon_impact_rule == 'all_types':
-        # Include all typhoon types: TD, TS, STS, TY, STY
-        typhoon_types = ['TD', 'TS', 'STS', 'TY', 'STY']
-        typhoon_flags = (
-            disasters.assign(typhoon_flag=lambda d: d['type'].isin(typhoon_types).astype(int))
-                     .groupby(['year', 'quarter'], as_index=False)['typhoon_flag']
-                     .max()
+    elif typhoon_impact_rule == 'STY_only':
+        # Legacy behavior for STY_only
+        storm_features = (
+            disasters.assign(typhoon_flag=lambda d: (d['type'] == 'STY').astype(int))
+                     .groupby(['year', 'quarter'], as_index=False)
+                     .agg({
+                         'typhoon_flag': 'max',
+                         'msw': 'max'
+                     })
+                     .rename(columns={
+                         'typhoon_flag': 'typhoon_impact',
+                         'msw': 'msw_max_per_quarter'
+                     })
         )
     else:
         raise ValueError(f"Unknown typhoon_impact_rule: {typhoon_impact_rule}")
@@ -203,29 +162,12 @@ def read_and_join_data(data_dir: str, typhoon_impact_rule: str = 'STY_only') -> 
     # Join on year and quarter
     joined = (
         agri.merge(climate, on=['year', 'quarter'], how='inner', suffixes=('', '_clim'))
-            .merge(typhoon_flags, on=['year', 'quarter'], how='left')
+            .merge(storm_features, on=['year', 'quarter'], how='left')
     )
 
-    # Use original disaster type column if present, else construct from flag for downstream processing
-    if 'type' not in joined.columns:
-        if typhoon_impact_rule == 'STY_only':
-            joined['type'] = np.where(joined['typhoon_flag'] == 1, 'STY', 'NA')
-        else:  # all_types
-            # For all_types, we need to preserve the actual typhoon type
-            # This is a simplified approach - in practice, you might want to handle multiple types per quarter
-            typhoon_quarters = disasters[disasters['type'].isin(['TD', 'TS', 'STS', 'TY', 'STY'])]
-            if not typhoon_quarters.empty:
-                # Get the strongest typhoon type per quarter
-                type_priority = {'STY': 5, 'TY': 4, 'STS': 3, 'TS': 2, 'TD': 1}
-                typhoon_quarters['priority'] = typhoon_quarters['type'].map(type_priority)
-                strongest_per_quarter = typhoon_quarters.groupby(['year', 'quarter'])['priority'].idxmax()
-                strongest_types = typhoon_quarters.loc[strongest_per_quarter, ['year', 'quarter', 'type']].rename(columns={'type': 'typhoon_type'})
-                joined = joined.merge(strongest_types, on=['year', 'quarter'], how='left')
-                joined['type'] = joined['typhoon_type'].fillna('NA')
-                joined = joined.drop('typhoon_type', axis=1)
-            else:
-                joined['type'] = 'NA'
-    joined['type'] = joined['type'].fillna('NA')
+    # Fill missing msw_max_per_quarter with 0 for quarters without any events
+    joined['msw_max_per_quarter'] = joined['msw_max_per_quarter'].fillna(0)
+    joined['typhoon_impact'] = joined['typhoon_impact'].fillna(0)
 
     # Ensure quarter is integer 1-4
     joined['quarter'] = pd.to_numeric(joined['quarter'], errors='coerce').astype('Int64')
@@ -298,10 +240,8 @@ def build_synthetic_dataframe() -> pd.DataFrame:
         'min_temperature': [22, 23, 21, 20],
         'max_temperature': [30, 32, 29, 28],
         'relative_humidity': [80, 85, 78, 75],
-        'wind_speed': [3.5, 4.0, 2.5, 3.0],
-        'wind_direction': [360, -273, 90, 270],  # invalid then valid
-        'type': ['NA', 'STY', 'NA', 'NA'],
-        'msw': [0, 200, 0, 0]
+        'typhoon_impact': [0, 1, 0, 0],
+        'msw_max_per_quarter': [0, 200, 0, 0]
     })
     return data
 
@@ -348,11 +288,9 @@ Join keys: year, quarter (all rows are Albay-wide and temporally aligned).
 - Test: {split['test_start']}–{split['test_end']}
 
 ### Features
-- rainfall, min_temperature, max_temperature, relative_humidity, wind_speed
-- wind_dir_sin, wind_dir_cos (from cleaned circular wind_direction)
-- quarter dummies (configurable)
-- typhoon_impact (1 if typhoon present based on typhoon_impact_rule)
-- optional one-quarter lag for climate features
+- rainfall, min_temperature, max_temperature, relative_humidity
+- typhoon_impact (1 if any storm event exists in that quarter, else 0)
+- msw_max_per_quarter (max msw for that quarter, 0 if no events, computed from all storm types TD/TS/STS/TY/STY)
 
 Target: rice_yield = produced_rice / area_harvested (t/ha), validated against provided column when close.
 
@@ -375,8 +313,13 @@ Target: rice_yield = produced_rice / area_harvested (t/ha), validated against pr
 - Control model saving and sample creation via `output.save_model` and `output.create_sample` settings.
 
 ### Notes
-- Typhoon impact configurable via typhoon_impact_rule (STY_only or all_types).
-- Wind direction outside [0,360) treated as missing, imputed by circular mean before sin/cos.
+- Typhoon impact configurable via typhoon_impact_rule (any_event uses all storm types TD/TS/STS/TY/STY).
+- msw_max_per_quarter is computed from all storm types, unit km/h, zero when no event.
+- Wind features, quarter dummies, and lag features are disabled for this iteration.
+
+### Storm features
+- **typhoon_impact**: Binary flag (1 if any storm event present in that quarter, 0 otherwise)
+- **msw_max_per_quarter**: Maximum sustained wind speed (km/h) for that quarter, 0 when no events occur
 """.strip() + "\n"
     with open('README.md', 'w', encoding='utf-8') as f:
         f.write(content)

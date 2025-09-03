@@ -4,6 +4,8 @@ import sys
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from utils import load_config, ensure_directories, prepare_datasets, save_model, write_predictions_and_summary, run_synthetic_self_check, write_readme
 
@@ -21,7 +23,12 @@ def main(config_path: str) -> None:
 
     ds, pre, train_df, test_df = prepare_datasets(cfg)
 
-    model = LinearRegression()
+    # Create StandardScaler + LinearRegression pipeline
+    model = Pipeline([
+        ('scaler', StandardScaler()),
+        ('regressor', LinearRegression())
+    ])
+    
     model.fit(ds.X_train, ds.y_train)
 
     preds = model.predict(ds.X_test)

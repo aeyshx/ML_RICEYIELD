@@ -569,45 +569,48 @@ def create_feature_importance_plot(model, model_name, output_dir, data_dir):
     if hasattr(model, 'feature_names_in_'):
         feature_names = model.feature_names_in_
     else:
-        # Construct feature names based on the preprocessing logic
+        # Construct feature names based on the updated preprocessing logic
         feature_names = [
-            'rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed',
-            'wind_dir_sin', 'wind_dir_cos', 'typhoon_impact',
-            'q_1', 'q_2', 'q_3', 'q_4',  # quarter dummies
-            'rainfall_lag1', 'min_temperature_lag1', 'max_temperature_lag1', 
-            'relative_humidity_lag1', 'wind_speed_lag1', 'wind_dir_sin_lag1', 'wind_dir_cos_lag1'
+            'rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 
+            'typhoon_impact', 'msw_max_per_quarter'
         ]
     
     # Get feature importances
     importances = model.feature_importances_
     
+    # Filter to only show the specified features in the importance chart
+    # (excluding msw_max_per_quarter as per requirement)
+    display_features = ['rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'typhoon_impact']
+    
     # Create DataFrame for easier handling
     importance_df = pd.DataFrame({
         'feature': feature_names,
         'importance': importances
-    }).sort_values('importance', ascending=True)
+    })
+    
+    # Filter to only display the specified features
+    display_df = importance_df[importance_df['feature'].isin(display_features)].copy()
+    display_df = display_df.sort_values('importance', ascending=True)
     
     # Create the plot
-    fig, ax = plt.subplots(figsize=(12, 8))
+    fig, ax = plt.subplots(figsize=(10, 6))
     
     # Create horizontal bar plot
-    bars = ax.barh(range(len(importance_df)), importance_df['importance'], 
+    bars = ax.barh(range(len(display_df)), display_df['importance'], 
                    color='steelblue', alpha=0.7)
     
     # Customize the plot
-    ax.set_yticks(range(len(importance_df)))
-    ax.set_yticklabels(importance_df['feature'])
+    ax.set_yticks(range(len(display_df)))
+    ax.set_yticklabels(display_df['feature'])
     ax.set_xlabel('Feature Importance')
     ax.set_title(f'Feature Importance — {model_name.upper()} Model', 
                  fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, axis='x')
     
     # Add value labels on bars
-    for i, (bar, importance) in enumerate(zip(bars, importance_df['importance'])):
+    for i, (bar, importance) in enumerate(zip(bars, display_df['importance'])):
         ax.text(bar.get_width() + 0.001, bar.get_y() + bar.get_height()/2, 
                 f'{importance:.3f}', ha='left', va='center', fontsize=9)
-    
-    # All features use consistent color (no highlighting)
     
     plt.tight_layout()
     
@@ -618,11 +621,16 @@ def create_feature_importance_plot(model, model_name, output_dir, data_dir):
     
     print(f"Saved feature importance plot: {output_path}")
     
-    # Print top 5 most important features
-    top_features = importance_df.tail(5)
+    # Print top 5 most important features (including all features)
+    top_features = importance_df.nlargest(5, 'importance')
     print(f"Top 5 most important features for {model_name.upper()}:")
     for _, row in top_features.iterrows():
         print(f"  {row['feature']}: {row['importance']:.4f}")
+    
+    # Note about msw_max_per_quarter not being displayed
+    if 'msw_max_per_quarter' in feature_names:
+        msw_importance = importance_df[importance_df['feature'] == 'msw_max_per_quarter']['importance'].iloc[0]
+        print(f"  Note: msw_max_per_quarter importance ({msw_importance:.4f}) is trained but not displayed in chart")
 
 
 def check_sample_predictions(output_dir, model_name):

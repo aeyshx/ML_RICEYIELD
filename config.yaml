@@ -14,7 +14,7 @@ random_state: 42
 features:
   use_quarter_dummies: false
   use_one_quarter_lag: false
-  typhoon_impact_rule: STY_only
+  typhoon_impact_rule: any_event
 
 output:
   save_model: true
