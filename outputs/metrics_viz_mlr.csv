@@ -1,0 +1,2 @@
+model_name,evaluation,test_start,test_end,n_points,rmse,mae,r2,mape
+mlr,oof_cv,,,80,0.9250876348458525,0.7100654536681552,-4.333561234184342,18.944745143177272

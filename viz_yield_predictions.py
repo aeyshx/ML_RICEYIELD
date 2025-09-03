@@ -136,32 +136,41 @@ def load_ground_truth(data_dir):
 
 
 def load_predictions(output_dir, model_name):
-    """Load model predictions from CSV file."""
-    predictions_path = os.path.join(output_dir, f"predictions_{model_name}.csv")
-    
-    if not os.path.exists(predictions_path):
-        print(f"Error: Predictions file '{predictions_path}' not found.")
+    """Load model predictions from CSV file.
+
+    Prefers new CV-based OOF predictions: predictions_oof_[model].csv.
+    Falls back to legacy predictions_[model].csv if OOF file not found.
+    """
+    oof_path = os.path.join(output_dir, f"predictions_oof_{model_name}.csv")
+    legacy_path = os.path.join(output_dir, f"predictions_{model_name}.csv")
+
+    predictions_path = None
+    if os.path.exists(oof_path):
+        predictions_path = oof_path
+    elif os.path.exists(legacy_path):
+        predictions_path = legacy_path
+    else:
+        print(f"Error: Neither '{oof_path}' nor '{legacy_path}' found.")
         sys.exit(1)
-    
+
     try:
         df = pd.read_csv(predictions_path)
-        
-        # Check if rice_yield column exists
+
+        # Standardize prediction column name
         if 'rice_yield' in df.columns:
-            # Rename to rice_yield_pred for clarity
             df = df.rename(columns={'rice_yield': 'rice_yield_pred'})
-        elif 'rice_yield_pred' in df.columns:
-            pass  # Already correctly named
-        else:
-            print("Error: No rice_yield column found in predictions file.")
+        elif 'rice_yield_pred' not in df.columns:
+            print("Error: No rice_yield or rice_yield_pred column found in predictions file.")
             print(f"Available columns: {list(df.columns)}")
             sys.exit(1)
-        
-        print(f"Loaded predictions data: {len(df)} rows")
+
+        print(f"Loaded predictions data: {len(df)} rows from {os.path.basename(predictions_path)}")
         print(f"Predictions columns: {list(df.columns)}")
-        
-        return df[['year', 'quarter', 'rice_yield_pred']]
-        
+
+        # Keep only required columns; include 'fold' if present
+        cols = ['year', 'quarter', 'rice_yield_pred'] + (['fold'] if 'fold' in df.columns else [])
+        return df[cols]
+
     except Exception as e:
         print(f"Error loading predictions data: {e}")
         sys.exit(1)
@@ -260,33 +269,45 @@ def setup_plotting_style():
 
 
 def create_time_series_plot(data, model_name, output_dir, test_start, test_end):
-    """Create time series overlay plot."""
+    """Create time series overlay plot.
+
+    If OOF predictions are provided (with 'fold'), plot the full series with
+    predictions at validation quarters highlighted and training regions faded.
+    Otherwise, revert to legacy test-window plot.
+    """
     fig, ax = plt.subplots(figsize=(12, 6))
     
     # Create time index
     data['time_index'] = data['year'] + (data['quarter'] - 1) / 4
-    
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
-    
-    # Plot true values
-    ax.plot(test_data['time_index'], test_data['rice_yield_true'], 
-            'o-', linewidth=2, markersize=6, label='True', color='blue')
-    
-    # Plot predicted values
-    ax.plot(test_data['time_index'], test_data['rice_yield_pred'], 
-            's--', linewidth=2, markersize=6, label='Predicted', color='red')
+    has_oof = 'fold' in data.columns
+    if has_oof:
+        # Plot full true series
+        ax.plot(data['time_index'], data['rice_yield_true'], 'o-', linewidth=1.5, markersize=4, label='True', color='blue')
+        # Highlight only validation (OOF) predictions
+        val_mask = ~data['fold'].isna()
+        ax.plot(data.loc[val_mask, 'time_index'], data.loc[val_mask, 'rice_yield_pred'],
+                's', markersize=6, label='OOF Pred', color='red')
+        # Light line through preds for readability
+        ax.plot(data.loc[val_mask, 'time_index'], data.loc[val_mask, 'rice_yield_pred'],
+                '--', linewidth=1, color='red', alpha=0.6)
+    else:
+        # Legacy: filter to test period
+        test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
+        ax.plot(test_data['time_index'], test_data['rice_yield_true'], 'o-', linewidth=2, markersize=6, label='True', color='blue')
+        ax.plot(test_data['time_index'], test_data['rice_yield_pred'], 's--', linewidth=2, markersize=6, label='Predicted', color='red')
     
     # Highlight STY quarters if available
-    if 'is_sty_quarter' in test_data.columns:
-        sty_data = test_data[test_data['is_sty_quarter'] == 1]
+    base_df = data if has_oof else test_data
+    if 'is_sty_quarter' in base_df.columns:
+        sty_data = base_df[base_df['is_sty_quarter'] == 1]
         if len(sty_data) > 0:
             ax.scatter(sty_data['time_index'], sty_data['rice_yield_true'], 
                       s=100, facecolors='none', edgecolors='orange', 
                       linewidth=2, label='STY Quarter', zorder=5)
     
     # Formatting
-    ax.set_title(f'Rice Yield (t/ha) — {model_name.upper()} — Test {test_start}-{test_end}', 
+    title_suffix = f'OOF CV (K-fold)' if has_oof else f'Test {test_start}-{test_end}'
+    ax.set_title(f'Rice Yield (t/ha) — {model_name.upper()} — {title_suffix}', 
                  fontsize=14, fontweight='bold')
     ax.set_xlabel('Year')
     ax.set_ylabel('Rice Yield (t/ha)')
@@ -294,13 +315,13 @@ def create_time_series_plot(data, model_name, output_dir, test_start, test_end):
     ax.grid(True, alpha=0.3)
     
     # Format x-axis ticks
-    years = range(test_start, test_end + 1)
+    years = range(int(data['year'].min()), int(data['year'].max()) + 1) if has_oof else range(test_start, test_end + 1)
     ax.set_xticks([y + 0.5 for y in years])
     ax.set_xticklabels([str(y) for y in years])
     
     # Annotate end-of-year points
     for year in years:
-        year_data = test_data[test_data['year'] == year]
+        year_data = base_df[base_df['year'] == year]
         if len(year_data) > 0:
             q4_data = year_data[year_data['quarter'] == 4]
             if len(q4_data) > 0:
@@ -320,11 +341,15 @@ def create_time_series_plot(data, model_name, output_dir, test_start, test_end):
 
 
 def create_parity_plot(data, model_name, output_dir, test_start, test_end):
-    """Create parity (y=x) scatter plot."""
+    """Create parity (y=x) scatter plot.
+
+    If OOF predictions are present, use all OOF points; otherwise, use test window.
+    """
     fig, ax = plt.subplots(figsize=(8, 8))
-    
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
+    has_oof = 'fold' in data.columns
+    df_plot = data.copy()
+    if not has_oof:
+        df_plot = df_plot[(df_plot['year'] >= test_start) & (df_plot['year'] <= test_end)].copy()
     
     # Create color map for quarters
     colors = plt.cm.Set1(np.linspace(0, 1, 4))
@@ -332,19 +357,19 @@ def create_parity_plot(data, model_name, output_dir, test_start, test_end):
     
     # Scatter plot by quarter
     for quarter in range(1, 5):
-        quarter_data = test_data[test_data['quarter'] == quarter]
+        quarter_data = df_plot[df_plot['quarter'] == quarter]
         if len(quarter_data) > 0:
             ax.scatter(quarter_data['rice_yield_true'], quarter_data['rice_yield_pred'],
                       c=[quarter_colors[quarter]], s=60, alpha=0.7, 
                       label=f'Q{quarter}', edgecolors='black', linewidth=0.5)
     
     # Add y=x reference line
-    min_val = min(test_data['rice_yield_true'].min(), test_data['rice_yield_pred'].min())
-    max_val = max(test_data['rice_yield_true'].max(), test_data['rice_yield_pred'].max())
+    min_val = min(df_plot['rice_yield_true'].min(), df_plot['rice_yield_pred'].min())
+    max_val = max(df_plot['rice_yield_true'].max(), df_plot['rice_yield_pred'].max())
     ax.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.5, label='y=x')
     
     # Compute and display metrics
-    metrics = compute_metrics(test_data['rice_yield_true'], test_data['rice_yield_pred'])
+    metrics = compute_metrics(df_plot['rice_yield_true'], df_plot['rice_yield_pred'])
     
     # Add metrics text box
     metrics_text = f'RMSE: {metrics["rmse"]:.3f}\nMAE: {metrics["mae"]:.3f}\nR²: {metrics["r2"]:.3f}\nMAPE: {metrics["mape"]:.1f}%'
@@ -352,7 +377,8 @@ def create_parity_plot(data, model_name, output_dir, test_start, test_end):
             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
     # Formatting
-    ax.set_title(f'Rice Yield Parity Plot — {model_name.upper()} — Test {test_start}-{test_end}', 
+    title_suffix = 'OOF CV' if has_oof else f'Test {test_start}-{test_end}'
+    ax.set_title(f'Rice Yield Parity Plot — {model_name.upper()} — {title_suffix}', 
                  fontsize=14, fontweight='bold')
     ax.set_xlabel('True Rice Yield (t/ha)')
     ax.set_ylabel('Predicted Rice Yield (t/ha)')
@@ -373,22 +399,26 @@ def create_parity_plot(data, model_name, output_dir, test_start, test_end):
 
 
 def create_residuals_plot(data, model_name, output_dir, test_start, test_end):
-    """Create residual diagnostics plot."""
+    """Create residual diagnostics plot.
+
+    If OOF predictions are present, use all OOF residuals; otherwise, use test window.
+    """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-    
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
+    has_oof = 'fold' in data.columns
+    df_plot = data.copy()
+    if not has_oof:
+        df_plot = df_plot[(df_plot['year'] >= test_start) & (df_plot['year'] <= test_end)].copy()
     
     # Compute residuals
-    test_data['residuals'] = test_data['rice_yield_pred'] - test_data['rice_yield_true']
-    test_data['time_index'] = test_data['year'] + (test_data['quarter'] - 1) / 4
+    df_plot['residuals'] = df_plot['rice_yield_pred'] - df_plot['rice_yield_true']
+    df_plot['time_index'] = df_plot['year'] + (df_plot['quarter'] - 1) / 4
     
     # Subplot A: Residuals vs Time
-    ax1.plot(test_data['time_index'], test_data['residuals'], 'o-', linewidth=1.5, markersize=4)
+    ax1.plot(df_plot['time_index'], df_plot['residuals'], 'o-', linewidth=1.5, markersize=4)
     ax1.axhline(y=0, color='red', linestyle='--', alpha=0.7)
     
     # Annotate largest absolute residuals
-    largest_residuals = test_data.loc[test_data['residuals'].abs().nlargest(3).index]
+    largest_residuals = df_plot.loc[df_plot['residuals'].abs().nlargest(3).index]
     for _, row in largest_residuals.iterrows():
         ax1.annotate(f'{row["year"]}-Q{row["quarter"]}', 
                     xy=(row['time_index'], row['residuals']),
@@ -401,34 +431,35 @@ def create_residuals_plot(data, model_name, output_dir, test_start, test_end):
     ax1.grid(True, alpha=0.3)
     
     # Format x-axis
-    years = range(test_start, test_end + 1)
+    years = range(int(df_plot['year'].min()), int(df_plot['year'].max()) + 1)
     ax1.set_xticks([y + 0.5 for y in years])
     ax1.set_xticklabels([str(y) for y in years])
     
     # Subplot B: Residuals vs Predicted
-    ax2.scatter(test_data['rice_yield_pred'], test_data['residuals'], alpha=0.6, s=50)
+    ax2.scatter(df_plot['rice_yield_pred'], df_plot['residuals'], alpha=0.6, s=50)
     ax2.axhline(y=0, color='red', linestyle='--', alpha=0.7)
     
     # Add trend line
     if LOWESS_AVAILABLE:
         # Use LOWESS smoothing
-        lowess_result = lowess(test_data['residuals'], test_data['rice_yield_pred'], 
+        lowess_result = lowess(df_plot['residuals'], df_plot['rice_yield_pred'], 
                               frac=0.3, it=3)
         ax2.plot(lowess_result[:, 0], lowess_result[:, 1], 'g-', linewidth=2, label='LOWESS')
     else:
         # Use simple moving average
-        sorted_data = test_data.sort_values('rice_yield_pred')
+        sorted_data = df_plot.sort_values('rice_yield_pred')
         window_size = max(3, len(sorted_data) // 10)
         ma_residuals = sorted_data['residuals'].rolling(window=window_size, center=True).mean()
         ax2.plot(sorted_data['rice_yield_pred'], ma_residuals, 'g-', linewidth=2, label='Moving Avg')
     
-    ax2.set_title('Residuals vs Predicted Values')
+    ax2.set_title('Residuals vs Predicted Values (OOF CV)' if has_oof else 'Residuals vs Predicted Values')
     ax2.set_xlabel('Predicted Rice Yield (t/ha)')
     ax2.set_ylabel('Residuals (t/ha)')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
-    plt.suptitle(f'Residual Diagnostics — {model_name.upper()} — Test {test_start}-{test_end}', 
+    title_suffix = 'OOF CV' if has_oof else f'Test {test_start}-{test_end}'
+    plt.suptitle(f'Residual Diagnostics — {model_name.upper()} — {title_suffix}', 
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
     
@@ -441,11 +472,15 @@ def create_residuals_plot(data, model_name, output_dir, test_start, test_end):
 
 
 def create_seasonal_plot(data, model_name, output_dir, test_start, test_end):
-    """Create seasonal distributions plot."""
+    """Create seasonal distributions plot.
+
+    If OOF predictions are present, use all OOF points; otherwise, use test window.
+    """
     fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
+    has_oof = 'fold' in data.columns
+    df_plot = data.copy()
+    if not has_oof:
+        df_plot = df_plot[(df_plot['year'] >= test_start) & (df_plot['year'] <= test_end)].copy()
     
     # Prepare data for boxplot
     plot_data = []
@@ -453,7 +488,7 @@ def create_seasonal_plot(data, model_name, output_dir, test_start, test_end):
     colors = []
     
     for quarter in range(1, 5):
-        quarter_data = test_data[test_data['quarter'] == quarter]
+        quarter_data = df_plot[df_plot['quarter'] == quarter]
         if len(quarter_data) > 0:
             # True values
             plot_data.append(quarter_data['rice_yield_true'].values)
@@ -480,13 +515,14 @@ def create_seasonal_plot(data, model_name, output_dir, test_start, test_end):
     
     # Add per-quarter MAE annotations
     for quarter in range(1, 5):
-        quarter_data = test_data[test_data['quarter'] == quarter]
+        quarter_data = df_plot[df_plot['quarter'] == quarter]
         if len(quarter_data) > 0:
             mae = mean_absolute_error(quarter_data['rice_yield_true'], quarter_data['rice_yield_pred'])
             ax.text(quarter * 2 - 0.5, ax.get_ylim()[1] * 0.95, f'MAE: {mae:.3f}', 
                    ha='center', fontsize=8, bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8))
     
-    ax.set_title(f'Seasonal Rice Yield Distributions — {model_name.upper()} — Test {test_start}-{test_end}', 
+    title_suffix = 'OOF CV' if has_oof else f'Test {test_start}-{test_end}'
+    ax.set_title(f'Seasonal Rice Yield Distributions — {model_name.upper()} — {title_suffix}', 
                  fontsize=14, fontweight='bold')
     ax.set_ylabel('Rice Yield (t/ha)')
     ax.grid(True, alpha=0.3)
@@ -505,31 +541,34 @@ def create_seasonal_plot(data, model_name, output_dir, test_start, test_end):
 
 
 def save_metrics(data, model_name, output_dir, test_start, test_end):
-    """Save metrics to CSV file."""
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
-    
-    # Compute metrics
-    metrics = compute_metrics(test_data['rice_yield_true'], test_data['rice_yield_pred'])
-    
-    # Create metrics DataFrame
+    """Save metrics to CSV file.
+
+    If OOF predictions are present, compute overall OOF metrics; else, compute test-window metrics.
+    """
+    has_oof = 'fold' in data.columns
+    df_eval = data.copy()
+    if not has_oof:
+        df_eval = df_eval[(df_eval['year'] >= test_start) & (df_eval['year'] <= test_end)].copy()
+
+    metrics = compute_metrics(df_eval['rice_yield_true'], df_eval['rice_yield_pred'])
+
     metrics_df = pd.DataFrame([{
         'model_name': model_name,
-        'test_start': test_start,
-        'test_end': test_end,
+        'evaluation': 'oof_cv' if has_oof else 'test_window',
+        'test_start': None if has_oof else test_start,
+        'test_end': None if has_oof else test_end,
         'n_points': metrics['n_points'],
         'rmse': metrics['rmse'],
         'mae': metrics['mae'],
         'r2': metrics['r2'],
         'mape': metrics['mape']
     }])
-    
-    # Save to CSV
-    output_path = os.path.join(output_dir, f'metrics_{model_name}.csv')
+
+    output_path = os.path.join(output_dir, f'metrics_viz_{model_name}.csv')
     metrics_df.to_csv(output_path, index=False)
-    
-    print(f"Saved metrics: {output_path}")
-    print(f"Metrics for {model_name.upper()}:")
+
+    print(f"Saved viz metrics: {output_path}")
+    print(f"Metrics for {model_name.upper()} ({'OOF CV' if has_oof else 'Test'}):")
     print(f"  RMSE: {metrics['rmse']:.3f} t/ha")
     print(f"  MAE: {metrics['mae']:.3f} t/ha")
     print(f"  R²: {metrics['r2']:.3f}")
@@ -720,15 +759,15 @@ def main():
         data = data.merge(disasters, on=['year', 'quarter'], how='left')
         data['is_sty_quarter'] = data['is_sty_quarter'].fillna(0)
     
-    # Filter to test period
-    test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
-    
-    print(f"Test data points: {len(test_data)}")
-    print(f"Test data range: {test_data['year'].min()}-{test_data['year'].max()}")
-    
-    if len(test_data) == 0:
-        print("Error: No test data points found.")
-        sys.exit(1)
+    # If OOF predictions exist, don't restrict to test period; otherwise, validate test availability
+    has_oof = 'fold' in data.columns
+    if not has_oof:
+        test_data = data[(data['year'] >= test_start) & (data['year'] <= test_end)].copy()
+        print(f"Test data points: {len(test_data)}")
+        print(f"Test data range: {test_data['year'].min()}-{test_data['year'].max()}")
+        if len(test_data) == 0:
+            print("Error: No test data points found.")
+            sys.exit(1)
     
     # Create visualizations
     print("\nCreating visualizations...")
@@ -761,7 +800,7 @@ def main():
     print("VISUALIZATION COMPLETE")
     print("=" * 60)
     print(f"All figures saved to: {output_dir}")
-    print(f"Metrics saved to: {output_dir}/metrics_{model_name}.csv")
+    print(f"Metrics saved to: {output_dir}/metrics_viz_{model_name}.csv")
     print("=" * 60)
 
 

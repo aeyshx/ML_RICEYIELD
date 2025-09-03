@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from utils import load_config, ensure_directories, prepare_datasets, save_model, write_predictions_and_summary, run_synthetic_self_check, write_readme
+from utils import load_config, ensure_directories, read_and_join_data, Preprocessor, save_model, run_synthetic_self_check, write_readme, get_cv_config, generate_time_series_folds, fit_transform_for_fold, write_oof_predictions, write_cv_metrics, write_cv_summary
 
 
 def main(config_path: str) -> None:
@@ -19,40 +19,81 @@ def main(config_path: str) -> None:
     print(f"scikit-learn: {sklearn.__version__}")
     print(f"random_state: {cfg.get('random_state', 42)}")
 
-    ds, pre, train_df, test_df = prepare_datasets(cfg)
-
-    model = RandomForestRegressor(
-        n_estimators=300,
-        random_state=cfg.get('random_state', 42),
-        n_jobs=-1
+    # Data and preprocessing
+    data = read_and_join_data(cfg['paths']['data_dir'], cfg['features'].get('typhoon_impact_rule', 'STY_only'))
+    data = data.sort_values(['year', 'quarter']).reset_index(drop=True)
+    pre = Preprocessor(
+        use_quarter_dummies=cfg['features'].get('use_quarter_dummies', True),
+        use_one_quarter_lag=cfg['features'].get('use_one_quarter_lag', True),
+        typhoon_impact_rule=cfg['features'].get('typhoon_impact_rule', 'STY_only')
     )
-    model.fit(ds.X_train, ds.y_train)
 
-    preds = model.predict(ds.X_test)
+    # CV config
+    cv_cfg = get_cv_config(cfg)
+    k = cv_cfg['k_folds']
+    gap = cv_cfg['gap']
+    strategy = cv_cfg['strategy']
+    max_train_size = cv_cfg['max_train_size']
 
-    rmse = np.sqrt(mean_squared_error(ds.y_test, preds))
-    mae = mean_absolute_error(ds.y_test, preds)
-    r2 = r2_score(ds.y_test, preds)
-    print(f"Test RMSE: {rmse:.4f} | MAE: {mae:.4f} | R2: {r2:.4f}")
+    oof_records = []
+    per_fold_metrics = []
+    fold_idx = 0
+    for train_idx, val_idx in generate_time_series_folds(len(data), k_folds=k, strategy=strategy, gap=gap, max_train_size=max_train_size):
+        X_all, y_all = fit_transform_for_fold(pre, data, train_idx)
+        X_train, y_train = X_all.iloc[train_idx], y_all.iloc[train_idx]
+        X_val, y_val = X_all.iloc[val_idx], y_all.iloc[val_idx]
 
-    # Save model if configured to do so
-    if cfg.get('output', {}).get('save_model', True):
-        model_path = save_model(model, cfg['paths']['models_dir'], 'rf')
+        model = RandomForestRegressor(
+            n_estimators=400,
+            max_depth=None,
+            min_samples_leaf=2,
+            max_features='sqrt',
+            random_state=cfg.get('random_state', 42),
+            n_jobs=-1
+        )
+        model.fit(X_train, y_train)
+        preds = model.predict(X_val)
+
+        rmse = float(np.sqrt(mean_squared_error(y_val, preds)))
+        mae = float(mean_absolute_error(y_val, preds))
+        r2 = float(r2_score(y_val, preds))
+        per_fold_metrics.append({'fold': fold_idx, 'n_points': int(len(val_idx)), 'rmse': rmse, 'mae': mae, 'r2': r2})
+
+        idx_meta = data.iloc[val_idx][['year', 'quarter', 'produced_rice', 'area_harvested']].reset_index(drop=True)
+        idx_meta['rice_yield_pred'] = preds
+        idx_meta['fold'] = fold_idx
+        oof_records.append(idx_meta)
+        fold_idx += 1
+
+    oof_df = pd.concat(oof_records, ignore_index=True)
+    pred_path = write_oof_predictions(oof_df, cfg['paths']['output_dir'], 'rf')
+    metrics_path = write_cv_metrics(per_fold_metrics, cfg['paths']['output_dir'], 'rf')
+    summary_path = write_cv_summary(oof_df['rice_yield_pred'].to_numpy(), cfg['paths']['output_dir'], 'rf')
+    print(f"Wrote OOF predictions: {pred_path}")
+    print(f"Wrote CV metrics: {metrics_path}")
+    print(f"Wrote CV summary: {summary_path}")
+
+    # Optional refit on full data and save
+    if cv_cfg['refit_full'] and cfg.get('output', {}).get('save_model', True):
+        pre.fit(data)
+        X_all, y_all = pre.transform(data)
+        final_model = RandomForestRegressor(
+            n_estimators=400,
+            max_depth=None,
+            min_samples_leaf=2,
+            max_features='sqrt',
+            random_state=cfg.get('random_state', 42),
+            n_jobs=-1
+        )
+        final_model.fit(X_all, y_all)
+        model_path = save_model(final_model, cfg['paths']['models_dir'], 'rf')
         print(f"Saved model to: {model_path}")
+        if cfg.get('output', {}).get('create_sample', True):
+            sp_pred, sp_sum = run_synthetic_self_check(pre, cfg, final_model, 'rf')
+            print(f"Synthetic predictions: {sp_pred}")
+            print(f"Synthetic summary: {sp_sum}")
     else:
-        print("Model saving disabled by configuration")
-
-    pred_path, summary_path = write_predictions_and_summary(ds.test_index, preds, cfg['paths']['output_dir'], 'rf')
-    print(f"Wrote predictions: {pred_path}")
-    print(f"Wrote summary: {summary_path}")
-
-    # Create sample outputs if configured to do so
-    if cfg.get('output', {}).get('create_sample', True):
-        sp_pred, sp_sum = run_synthetic_self_check(pre, cfg, model, 'rf')
-        print(f"Synthetic predictions: {sp_pred}")
-        print(f"Synthetic summary: {sp_sum}")
-    else:
-        print("Sample creation disabled by configuration")
+        print("Model saving disabled by configuration or refit_full is False")
 
     write_readme(cfg)
 

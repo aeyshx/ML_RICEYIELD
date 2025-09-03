@@ -9,9 +9,10 @@ This repository trains three standalone regressors to predict quarterly rice_yie
 
 Join keys: year, quarter (all rows are Albay-wide and temporally aligned).
 
-### Training/Test split
-- Train: 2000–2018
-- Test: 2019–2023
+### Cross-validation
+- Time-aware K-fold CV with scikit-learn TimeSeriesSplit
+- Folds: 5 | Strategy: expanding | Gap: 0
+- OOF predictions are concatenated validation predictions across folds
 
 ### Features
 - rainfall, min_temperature, max_temperature, relative_humidity, wind_speed
@@ -26,19 +27,21 @@ Target: rice_yield = produced_rice / area_harvested (t/ha), validated against pr
 - Python 3.13.5 recommended with modern NumPy/Pandas/scikit-learn pins.
 - Install dependencies from requirements.txt.
 - Train/evaluate models:
-  python src/mlr_model.py --config config.yaml
-  python src/rf_model.py --config config.yaml
-  python src/gbr_model.py --config config.yaml
+  - `python src/mlr_model.py --config config.yaml`
+  - `python src/rf_model.py --config config.yaml`
+  - `python src/gbr_model.py --config config.yaml`
 
 ### Outputs
-- Predictions (test rows only): outputs/predictions_[model].csv with columns [year, quarter, produced_rice, area_harvested, rice_yield]
-- Per-model summary CSV: outputs/summary_[model].csv with [min_pred_yield, mean_pred_yield, max_pred_yield]
+- OOF predictions: outputs/predictions_oof_[model].csv with [year, quarter, produced_rice, area_harvested, rice_yield_pred, fold]
+- CV metrics: outputs/metrics_cv_[model].csv with per-fold rows and aggregate stats
+- CV summary: outputs/summary_cv_[model].csv with [min_pred_yield, mean_pred_yield, max_pred_yield]
 - Saved models: models/*.joblib
 - Synthetic self-check outputs: outputs/sample/sample_predictions_[model].csv and sample_summary_[model].csv
 
 ### Configuration
 - See config.yaml. Environment overrides via .env (.env.example provided) for DATA_DIR, OUTPUT_DIR, MODELS_DIR.
 - Control model saving and sample creation via `output.save_model` and `output.create_sample` settings.
+- CV block: k_folds, strategy (expanding|rolling), gap, max_train_size, refit_full
 
 ### Notes
 - Typhoon impact configurable via typhoon_impact_rule (STY_only or all_types).

@@ -7,7 +7,9 @@ import yaml
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Generator
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from dotenv import load_dotenv
 
 
@@ -46,6 +48,10 @@ class Preprocessor:
         self.typhoon_impact_rule = typhoon_impact_rule
         self.circular_mean_deg_: Optional[float] = None
         self.feature_columns_: List[str] = []
+        # Stats computed on training data for fold-safe transforms
+        self._quarter_means_: Dict[str, pd.Series] = {}
+        self._quarter_stds_: Dict[str, pd.Series] = {}
+        self._winsor_bounds_: Dict[str, Tuple[float, float]] = {}
 
     @staticmethod
     def _clean_numeric_series(series: pd.Series) -> pd.Series:
@@ -93,6 +99,18 @@ class Preprocessor:
         wind_dir = self._sanitize_wind_direction(df_joined['wind_direction'])
         valid_angles = wind_dir.dropna().to_numpy(dtype=float)
         self.circular_mean_deg_ = self._circular_mean_degrees(valid_angles)
+        # Compute per-quarter means/stds for anomalies
+        q_groups = df_joined.copy()
+        q_groups['quarter'] = pd.to_numeric(q_groups['quarter'], errors='coerce').astype('Int64')
+        for col in ['rainfall', 'min_temperature', 'max_temperature']:
+            series = pd.to_numeric(q_groups[col], errors='coerce')
+            stats = series.groupby(q_groups['quarter'])
+            self._quarter_means_[col] = stats.mean()
+            self._quarter_stds_[col] = stats.std(ddof=0).replace(0, np.nan)
+        # Winsorization bounds from training distribution
+        for col in ['rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed']:
+            s = pd.to_numeric(df_joined[col], errors='coerce')
+            self._winsor_bounds_[col] = (float(s.quantile(0.01)), float(s.quantile(0.99)))
         return self
 
     def transform(self, df_joined: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
@@ -105,12 +123,20 @@ class Preprocessor:
         # Target
         y = self._validate_and_compute_target(df)
 
-        # Climate base features
+        # Climate base features with sanitization
         df['rainfall'] = pd.to_numeric(df['rainfall'], errors='coerce')
         df['min_temperature'] = pd.to_numeric(df['min_temperature'], errors='coerce')
         df['max_temperature'] = pd.to_numeric(df['max_temperature'], errors='coerce')
         df['relative_humidity'] = pd.to_numeric(df['relative_humidity'], errors='coerce')
+        # RH sentinel and range check
+        df['relative_humidity'] = df['relative_humidity'].where((df['relative_humidity'] >= 0) & (df['relative_humidity'] <= 100))
+        df.loc[df['relative_humidity'] == -999, 'relative_humidity'] = np.nan
         df['wind_speed'] = pd.to_numeric(df['wind_speed'], errors='coerce')
+        # Winsorize extremes using training bounds
+        for col in ['rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed']:
+            if col in self._winsor_bounds_:
+                low, high = self._winsor_bounds_[col]
+                df[col] = df[col].clip(lower=low, upper=high)
 
         # Wind direction cleaning and circular encoding with imputation
         wind_dir = self._sanitize_wind_direction(df['wind_direction'])
@@ -135,24 +161,42 @@ class Preprocessor:
         if self.use_quarter_dummies:
             quarter_dummies = pd.get_dummies(df['quarter'], prefix='q', dtype=int)
             df = pd.concat([df, quarter_dummies], axis=1)
+        # Cyclical quarter encoding
+        q_numeric = pd.to_numeric(df['quarter'], errors='coerce').astype(float)
+        df['quarter_sin'] = np.sin(2 * np.pi * (q_numeric - 1) / 4.0)
+        df['quarter_cos'] = np.cos(2 * np.pi * (q_numeric - 1) / 4.0)
 
-        # Optional one-quarter lag of climate features to reflect harvest timing
+        # Climate anomalies per quarter (z-scores using training means/stds)
+        for col in ['rainfall', 'min_temperature', 'max_temperature']:
+            means = self._quarter_means_.get(col, pd.Series(dtype=float))
+            stds = self._quarter_stds_.get(col, pd.Series(dtype=float))
+            df = df.merge(means.rename(f'{col}_q_mean'), left_on='quarter', right_index=True, how='left')
+            df = df.merge(stds.rename(f'{col}_q_std'), left_on='quarter', right_index=True, how='left')
+            df[f'{col}_anomaly'] = (df[col] - df[f'{col}_q_mean']) / df[f'{col}_q_std']
+            df = df.drop(columns=[f'{col}_q_mean', f'{col}_q_std'])
+
+        # Optional lags of climate and cyclical wind features
         if self.use_one_quarter_lag:
-            lag_cols = ['rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed', 'wind_dir_sin', 'wind_dir_cos']
+            lag_cols = ['rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed', 'wind_dir_sin', 'wind_dir_cos', 'rainfall_anomaly', 'min_temperature_anomaly', 'max_temperature_anomaly', 'quarter_sin', 'quarter_cos', 'quarter_max_msw', 'quarter_event_count']
             # Sort chronologically and shift for lag features
             df = df.sort_values(['year', 'quarter']).reset_index(drop=True)
             for col in lag_cols:
                 df[f'{col}_lag1'] = df[col].shift(1)
+                df[f'{col}_lag2'] = df[col].shift(2)
 
         # Final feature set
         feature_cols = [
             'rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed',
-            'wind_dir_sin', 'wind_dir_cos', 'typhoon_impact'
+            'wind_dir_sin', 'wind_dir_cos', 'typhoon_impact',
+            'quarter_sin', 'quarter_cos',
+            'rainfall_anomaly', 'min_temperature_anomaly', 'max_temperature_anomaly',
+            'quarter_max_msw', 'quarter_event_count'
         ]
         if self.use_quarter_dummies:
             feature_cols.extend([c for c in df.columns if c.startswith('q_')])
         if self.use_one_quarter_lag:
-            feature_cols.extend([f'{c}_lag1' for c in ['rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed', 'wind_dir_sin', 'wind_dir_cos']])
+            feature_cols.extend([f'{c}_lag1' for c in ['rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed', 'wind_dir_sin', 'wind_dir_cos', 'rainfall_anomaly', 'min_temperature_anomaly', 'max_temperature_anomaly', 'quarter_sin', 'quarter_cos', 'quarter_max_msw', 'quarter_event_count']])
+            feature_cols.extend([f'{c}_lag2' for c in ['rainfall', 'min_temperature', 'max_temperature', 'relative_humidity', 'wind_speed', 'wind_dir_sin', 'wind_dir_cos', 'rainfall_anomaly', 'min_temperature_anomaly', 'max_temperature_anomaly', 'quarter_sin', 'quarter_cos', 'quarter_max_msw', 'quarter_event_count']])
 
         X = df[feature_cols].copy()
         # Simple imputation for any remaining missing values (e.g., first lag)
@@ -180,8 +224,12 @@ def read_and_join_data(data_dir: str, typhoon_impact_rule: str = 'STY_only') -> 
         if 'year' not in df.columns or 'quarter' not in df.columns:
             raise ValueError('All input files must contain year and quarter columns')
 
-    # Reduce disasters to per-quarter typhoon presence based on rule
+    # Reduce disasters to per-quarter typhoon presence based on rule and derive intensity/count features
     disasters['type'] = disasters['type'].astype(str).str.upper()
+    # Ensure msw exists (if missing, fill with 0)
+    if 'msw' not in disasters.columns:
+        disasters['msw'] = 0
+    disasters['event_id'] = 1
     
     if typhoon_impact_rule == 'STY_only':
         typhoon_flags = (
@@ -200,10 +248,17 @@ def read_and_join_data(data_dir: str, typhoon_impact_rule: str = 'STY_only') -> 
     else:
         raise ValueError(f"Unknown typhoon_impact_rule: {typhoon_impact_rule}")
 
+    # Disaster intensity and frequency features
+    per_quarter_intensity = disasters.groupby(['year', 'quarter'], as_index=False).agg(
+        quarter_max_msw=('msw', 'max'),
+        quarter_event_count=('event_id', 'count')
+    )
+
     # Join on year and quarter
     joined = (
         agri.merge(climate, on=['year', 'quarter'], how='inner', suffixes=('', '_clim'))
             .merge(typhoon_flags, on=['year', 'quarter'], how='left')
+            .merge(per_quarter_intensity, on=['year', 'quarter'], how='left')
     )
 
     # Use original disaster type column if present, else construct from flag for downstream processing
@@ -241,10 +296,23 @@ def chronological_split(df: pd.DataFrame, train_start: int, train_end: int, test
 
 
 def prepare_datasets(cfg: Dict) -> Tuple[DatasetSplit, Preprocessor, pd.DataFrame, pd.DataFrame]:
+    # Deprecated: retained for backward-compatibility with older scripts.
     paths = cfg['paths']
-    split = cfg['split_years']
+    split = cfg.get('split_years', {})
     typhoon_impact_rule = cfg['features'].get('typhoon_impact_rule', 'STY_only')
     data = read_and_join_data(paths['data_dir'], typhoon_impact_rule)
+
+    if not split:
+        # Fallback: use full data as both train and test (no real split)
+        df_sorted = data.sort_values(['year', 'quarter']).reset_index(drop=True)
+        pre = Preprocessor(
+            use_quarter_dummies=cfg['features'].get('use_quarter_dummies', True),
+            use_one_quarter_lag=cfg['features'].get('use_one_quarter_lag', True),
+            typhoon_impact_rule=typhoon_impact_rule
+        )
+        pre.fit(df_sorted)
+        X_all, y_all = pre.transform(df_sorted)
+        return DatasetSplit(X_all, y_all, X_all, y_all, df_sorted[['year', 'quarter', 'produced_rice', 'area_harvested']].copy()), pre, df_sorted, df_sorted
 
     train_df, test_df = chronological_split(data, split['train_start'], split['train_end'], split['test_start'], split['test_end'])
 
@@ -261,6 +329,74 @@ def prepare_datasets(cfg: Dict) -> Tuple[DatasetSplit, Preprocessor, pd.DataFram
     test_index = test_df[['year', 'quarter', 'produced_rice', 'area_harvested']].copy()
 
     return DatasetSplit(X_train, y_train, X_test, y_test, test_index), pre, train_df, test_df
+
+
+# --- Time-aware cross-validation utilities ---
+
+def get_cv_config(cfg: Dict) -> Dict:
+    cv_cfg = cfg.get('cv', {}) or {}
+    return {
+        'k_folds': int(cv_cfg.get('k_folds', 5)),
+        'strategy': str(cv_cfg.get('strategy', 'expanding')),
+        'gap': int(cv_cfg.get('gap', 0)),
+        'max_train_size': cv_cfg.get('max_train_size', None),
+        'refit_full': bool(cv_cfg.get('refit_full', True)),
+    }
+
+
+def generate_time_series_folds(n_samples: int, k_folds: int = 5, strategy: str = 'expanding', gap: int = 0, max_train_size: Optional[int] = None) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+    if strategy not in ('expanding', 'rolling'):
+        raise ValueError("strategy must be 'expanding' or 'rolling'")
+    effective_max_train = max_train_size if strategy == 'rolling' else None
+    tss = TimeSeriesSplit(n_splits=k_folds, gap=gap, max_train_size=effective_max_train)
+    indices = np.arange(n_samples)
+    for train_idx, val_idx in tss.split(indices):
+        yield train_idx, val_idx
+
+
+def fit_transform_for_fold(pre: Preprocessor, df_sorted: pd.DataFrame, train_idx: np.ndarray) -> Tuple[pd.DataFrame, pd.Series]:
+    # Fit preprocessor on training subset to compute circular mean, etc., then transform full sorted df
+    pre.fit(df_sorted.iloc[train_idx].reset_index(drop=True))
+    X_all, y_all = pre.transform(df_sorted)
+    return X_all, y_all
+
+
+def write_oof_predictions(oof_rows: pd.DataFrame, output_dir: str, model_name: str) -> str:
+    pred_path = os.path.join(output_dir, f"predictions_oof_{model_name}.csv")
+    oof_rows.to_csv(pred_path, index=False)
+    return pred_path
+
+
+def write_cv_metrics(per_fold: List[Dict], output_dir: str, model_name: str) -> str:
+    metrics_df = pd.DataFrame(per_fold)
+    agg = {
+        'fold': ['aggregate'],
+        'n_points': [int(metrics_df['n_points'].sum()) if 'n_points' in metrics_df else 0],
+        'rmse': [float(metrics_df['rmse'].mean())],
+        'mae': [float(metrics_df['mae'].mean())],
+        'r2': [float(metrics_df['r2'].mean())],
+        'std_rmse': [float(metrics_df['rmse'].std(ddof=0))],
+        'std_mae': [float(metrics_df['mae'].std(ddof=0))],
+        'std_r2': [float(metrics_df['r2'].std(ddof=0))],
+    }
+    agg_df = pd.DataFrame(agg)
+    # Ensure consistent column order
+    cols = ['fold', 'n_points', 'rmse', 'mae', 'r2', 'std_rmse', 'std_mae', 'std_r2']
+    out_df = pd.concat([metrics_df, agg_df], ignore_index=True)[cols]
+    path = os.path.join(output_dir, f"metrics_cv_{model_name}.csv")
+    out_df.to_csv(path, index=False)
+    return path
+
+
+def write_cv_summary(all_preds: np.ndarray, output_dir: str, model_name: str) -> str:
+    summary = pd.DataFrame({
+        'min_pred_yield': [float(np.min(all_preds))],
+        'mean_pred_yield': [float(np.mean(all_preds))],
+        'max_pred_yield': [float(np.max(all_preds))]
+    })
+    summary_path = os.path.join(output_dir, f"summary_cv_{model_name}.csv")
+    summary.to_csv(summary_path, index=False)
+    return summary_path
 
 
 def save_model(model, models_dir: str, model_name: str) -> str:
@@ -330,7 +466,7 @@ def run_synthetic_self_check(pre: Preprocessor, cfg: Dict, model, model_name: st
 
 def write_readme(cfg: Dict) -> None:
     paths = cfg['paths']
-    split = cfg['split_years']
+    cv_cfg = get_cv_config(cfg)
     content = f"""
 ## Rice Yield Prediction (Albay) - Regression Pipelines
 
@@ -343,9 +479,10 @@ This repository trains three standalone regressors to predict quarterly rice_yie
 
 Join keys: year, quarter (all rows are Albay-wide and temporally aligned).
 
-### Training/Test split
-- Train: {split['train_start']}–{split['train_end']}
-- Test: {split['test_start']}–{split['test_end']}
+### Cross-validation
+- Time-aware K-fold CV with scikit-learn TimeSeriesSplit
+- Folds: {cv_cfg['k_folds']} | Strategy: {cv_cfg['strategy']} | Gap: {cv_cfg['gap']}
+- OOF predictions are concatenated validation predictions across folds
 
 ### Features
 - rainfall, min_temperature, max_temperature, relative_humidity, wind_speed
@@ -365,14 +502,16 @@ Target: rice_yield = produced_rice / area_harvested (t/ha), validated against pr
   - `python src/gbr_model.py --config config.yaml`
 
 ### Outputs
-- Predictions (test rows only): {paths['output_dir']}/predictions_[model].csv with columns [year, quarter, produced_rice, area_harvested, rice_yield]
-- Per-model summary CSV: {paths['output_dir']}/summary_[model].csv with [min_pred_yield, mean_pred_yield, max_pred_yield]
+- OOF predictions: {paths['output_dir']}/predictions_oof_[model].csv with [year, quarter, produced_rice, area_harvested, rice_yield_pred, fold]
+- CV metrics: {paths['output_dir']}/metrics_cv_[model].csv with per-fold rows and aggregate stats
+- CV summary: {paths['output_dir']}/summary_cv_[model].csv with [min_pred_yield, mean_pred_yield, max_pred_yield]
 - Saved models: {paths['models_dir']}/*.joblib
 - Synthetic self-check outputs: {paths['output_dir']}/sample/sample_predictions_[model].csv and sample_summary_[model].csv
 
 ### Configuration
 - See config.yaml. Environment overrides via .env (.env.example provided) for DATA_DIR, OUTPUT_DIR, MODELS_DIR.
 - Control model saving and sample creation via `output.save_model` and `output.create_sample` settings.
+- CV block: k_folds, strategy (expanding|rolling), gap, max_train_size, refit_full
 
 ### Notes
 - Typhoon impact configurable via typhoon_impact_rule (STY_only or all_types).

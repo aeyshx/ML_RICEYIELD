@@ -3,6 +3,7 @@ paths:
   output_dir: outputs
   models_dir: models
 
+# Deprecated holdout config kept for backward-compatibility but not used for CV training
 split_years:
   train_start: 2000
   train_end: 2018
@@ -12,10 +13,17 @@ split_years:
 random_state: 42
 
 features:
-  use_quarter_dummies: false
-  use_one_quarter_lag: false
+  use_quarter_dummies: true
+  use_one_quarter_lag: true
   typhoon_impact_rule: STY_only
 
+cv:
+  k_folds: 5
+  strategy: expanding   # expanding or rolling
+  gap: 0
+  max_train_size: null  # only used for rolling
+  refit_full: true
+
 output:
-  save_model: true
+  save_model: false
   create_sample: false
