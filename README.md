@@ -11,7 +11,7 @@ Join keys: year, quarter (all rows are Albay-wide and temporally aligned).
 
 ### Training/Test split
 - Train: 2000–2018
-- Test: 2019–2023
+- Test: 2006–2018
 
 ### Features
 - rainfall, min_temperature, max_temperature, relative_humidity, wind_speed
